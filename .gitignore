@@ -1,0 +1,5 @@
+target/
+**/*.rs.bk
+
+test_data/decomp.ex
+test_data/Elixir.Test.beam

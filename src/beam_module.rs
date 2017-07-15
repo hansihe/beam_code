@@ -36,8 +36,12 @@ impl Module {
         let imports_raw = file.chunks.iter().find(|c| &c.id == b"ImpT").unwrap();
         let imports = read_imports(&imports_raw.data, &atoms);
 
-        let lambdas_raw = file.chunks.iter().find(|c| &c.id == b"FunT").unwrap();
-        let lambdas = read_lambdas(&lambdas_raw.data, &atoms);
+        let lambdas_raw_opt = file.chunks.iter().find(|c| &c.id == b"FunT");
+        let lambdas = if let Some(lambdas_raw) = lambdas_raw_opt {
+            read_lambdas(&lambdas_raw.data, &atoms)
+        } else {
+            vec![]
+        };
 
         let lit_raw = file.chunks.iter().find(|c| &c.id == b"LitT").unwrap();
         println!("{:?}", lit_raw);

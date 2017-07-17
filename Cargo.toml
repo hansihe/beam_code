@@ -1,6 +1,6 @@
 [package]
 authors = ["HansiHE <hansihe@hansihe.com>"]
-name = "beam_compile"
+name = "beam_code"
 version = "0.1.0"
 
 [dependencies]

@@ -122,10 +122,13 @@ pub enum OpKind {
 
 #[derive(Debug, Clone)]
 pub enum RaiseType {
-    Error { class: Source, value: Source },
-    BadMatch(Source),
+    /// 2 reads, error class and value
+    Error,
+    /// 1 read, the failed match
+    BadMatch,
     IfEnd,
-    CaseEnd(Source),
+    /// 1 read, the failed match
+    CaseEnd,
 }
 
 #[derive(Debug, Clone)]
@@ -208,6 +211,7 @@ impl Op {
             OpKind::CallExtLast { .. } => false,
             OpKind::CallExtOnly { .. } => false,
             OpKind::Jump => false,
+            OpKind::SelectVal { .. } => false, // Is this right? Can label be 0?
             _ => true,
         }
     }
@@ -428,13 +432,17 @@ impl Op {
             n if n == "is_eq_exact" => make_binary_test(raw_op, BinaryTest::IsEqExact, module),
             n if n == "is_ne_exact" => make_binary_test(raw_op, BinaryTest::IsNeExact, module),
             n if n == "badmatch" =>
-                Op::empty(OpKind::Raise(RaiseType::BadMatch(
-                    Source::from_raw(&raw_op.args[0], module).unwrap()))),
+                Op::with_reads(
+                    OpKind::Raise(RaiseType::BadMatch),
+                    vec![Source::from_raw(&raw_op.args[0], module).unwrap()]
+                ),
             n if n == "if_end" =>
                 Op::empty(OpKind::Raise(RaiseType::IfEnd)),
             n if n == "case_end" =>
-                Op::empty(OpKind::Raise(RaiseType::CaseEnd(
-                    Source::from_raw(&raw_op.args[0], module).unwrap()))),
+                Op::with_reads(
+                    OpKind::Raise(RaiseType::CaseEnd),
+                    vec![Source::from_raw(&raw_op.args[0], module).unwrap()]
+                ),
             n if n == "int_code_end" =>
                 Op::empty(OpKind::CodeEnd),
             n if n == "get_map_elements" => {
@@ -470,10 +478,11 @@ impl Op {
                     exception_ctx: Register::from_raw(&raw_op.args[0]).unwrap()
                 }),
             n if n == "raise" =>
-                Op::empty(OpKind::Raise(RaiseType::Error {
-                    value: Source::from_raw(&raw_op.args[0], module).unwrap(),
-                    class: Source::from_raw(&raw_op.args[1], module).unwrap(),
-                })),
+                Op::with_reads(
+                    OpKind::Raise(RaiseType::Error),
+                    vec![Source::from_raw(&raw_op.args[0], module).unwrap(),
+                         Source::from_raw(&raw_op.args[1], module).unwrap()]
+                ),
             n if n == "jump" => Op {
                 kind: OpKind::Jump,
                 labels: vec![LabelId(raw_op.args[0].fail_label())],

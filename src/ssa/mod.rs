@@ -1,23 +1,34 @@
 use ::std::collections::HashSet;
 use ::std::collections::HashMap;
 
-use ::op::{ Op, LabelId, Register, OpKind, Source };
+use ::op::{ Op, LabelId, Register, OpKind, Source, Literal };
 use ::beam_module::{ Module, Atom };
 
 use ::itertools::Itertools;
 
+mod representation;
+pub use self::representation::{
+    SSAOp,
+    SSAFunction,
+    SSABasicBlock,
+    PhiNode,
+    SSARegister,
+    SSASource,
+    ExtLabel,
+};
+
 #[derive(Debug)]
-pub struct Function {
+pub struct IntFunction {
     name: Atom,
     arity: u32,
     num_free: u32,
     entry: ExtLabel,
-    blocks: HashMap<ExtLabel, BasicBlock>,
+    blocks: HashMap<ExtLabel, IntBasicBlock>,
     args: Vec<(Register, SSARegister)>,
 }
 
 #[derive(Debug, Clone)]
-pub struct BasicBlock {
+pub struct IntBasicBlock {
     label: ExtLabel,
     continuation: Option<ExtLabel>,
     jumps: Vec<LabelId>,
@@ -25,53 +36,17 @@ pub struct BasicBlock {
     phi_nodes: HashMap<Register, PhiNode>,
 }
 
-#[derive(Debug, Clone)]
-struct PhiNode {
-    output: SSARegister,
-    inputs: HashMap<ExtLabel, SSARegister>,
-    dead: bool,
-}
-
-#[derive(Copy, Clone)]
-pub struct SSARegister(u32);
-impl ::std::fmt::Debug for SSARegister {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        write!(f, "SSARegister({})", self.0)
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct ExtOp {
     op: Op,
     writes: Vec<SSARegister>,
-    reads: Vec<Option<SSARegister>>,
+    reads: Vec<SSASource>,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub enum ExtLabel {
-    Original(u32),
-    Added(u32),
-}
-impl ::std::fmt::Debug for ExtLabel {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        match *self {
-            ExtLabel::Original(i) => write!(f, "Original({})", i),
-            ExtLabel::Added(i) => write!(f, "Added({})", i),
-        }
-    }
-}
-impl ExtLabel {
-    pub fn name(self) -> String {
-        match self {
-            ExtLabel::Original(l) => format!("o{}", l),
-            ExtLabel::Added(l) => format!("a{}", l),
-        }
-    }
-}
-
-pub fn code_to_functions(code: &[Op], module: &Module) -> Vec<Function> {
+pub fn code_to_functions(code: &[Op], module: &Module) -> Vec<SSAFunction> {
     // Split bytecode into opcodes
-    let mut basic_blocks: Vec<BasicBlock> = code.iter()
+    let mut basic_blocks: Vec<IntBasicBlock> = code.iter()
         .scan((false, 0u32), |&mut (ref mut last_label, ref mut id), op| {
             let res = match (op.is_label(), op.has_jump(), *last_label) {
                 (a, b, _) if a && b => unreachable!(),
@@ -97,15 +72,14 @@ pub fn code_to_functions(code: &[Op], module: &Module) -> Vec<Function> {
         .map(|(_id, ops)|
              ops.into_iter()
              .map(|(_id, op)| {
-                 let dests = op.writes.iter().map(|i| {
+                 let dests = op.writes.iter().map(|_| {
                      SSARegister(0)
                  }).collect();
 
                  let srcs = op.reads.iter().map(|i| {
-                     if let Source::Register(reg) = *i {
-                         Some(SSARegister(0))
-                     } else {
-                         None
+                     match *i {
+                         Source::Register(_) => SSASource::Register(SSARegister(0)),
+                         Source::Literal(ref lit) => SSASource::Literal(lit.clone()),
                      }
                  }).collect();
 
@@ -117,7 +91,7 @@ pub fn code_to_functions(code: &[Op], module: &Module) -> Vec<Function> {
              })
         )
         .enumerate()
-        .map(|(added_label, ops)| BasicBlock {
+        .map(|(added_label, ops)| IntBasicBlock {
             label: ExtLabel::Added(added_label as u32),
             continuation: None,
             jumps: Vec::new(),
@@ -159,7 +133,7 @@ pub fn code_to_functions(code: &[Op], module: &Module) -> Vec<Function> {
     }
 
     let resolve_label = |label_id| {
-        let mut blocks: HashMap<ExtLabel, BasicBlock> = HashMap::new();
+        let mut blocks: HashMap<ExtLabel, IntBasicBlock> = HashMap::new();
 
         let mut to_add: Vec<ExtLabel> = vec![label_id];
 
@@ -188,7 +162,7 @@ pub fn code_to_functions(code: &[Op], module: &Module) -> Vec<Function> {
 
     for export in &module.exports {
         let label = ExtLabel::Original(export.label);
-        functions.push(Function {
+        functions.push(IntFunction {
             name: export.function.clone(),
             arity: export.arity,
             num_free: 0,
@@ -199,7 +173,7 @@ pub fn code_to_functions(code: &[Op], module: &Module) -> Vec<Function> {
     }
     for lambda in &module.lambdas {
         let label = ExtLabel::Original(lambda.label);
-        functions.push(Function {
+        functions.push(IntFunction {
             name: lambda.function.clone(),
             arity: lambda.arity,
             num_free: lambda.num_free,
@@ -213,12 +187,45 @@ pub fn code_to_functions(code: &[Op], module: &Module) -> Vec<Function> {
         function_propagate_ssa(function);
     }
 
-    functions
+    // Clean up
+    let cleaned = functions.iter().map(|f| {
+        SSAFunction {
+            name: f.name.clone(),
+            arity: f.arity,
+            num_free: f.num_free,
+            entry: f.entry,
+            args: f.args.iter().map(|&(_, arg)| arg).collect(),
+            blocks: f.blocks.iter().map(|(label, block)| {
+                let res = SSABasicBlock {
+                    label: *label,
+                    continuation: block.continuation,
+                    jumps: block.jumps.iter()
+                        .map(|l| ExtLabel::Original(l.0)).collect(),
+                    phi_nodes: block.phi_nodes.values().cloned().collect(),
+                    ops: block.ops.iter().enumerate().map(|(op_num, op)| {
+                        if op_num != block.ops.len()-1 {
+                            assert!(op.op.labels.len() == 0);
+                        }
+                        SSAOp {
+                            kind: op.op.kind.clone(),
+                            reads: op.reads.clone(),
+                            writes: op.writes.clone(),
+                        }
+                    }).collect(),
+                };
+                (*label, res)
+            }).collect(),
+        }
+    }).collect();
+
+    cleaned
 }
 
-fn function_dominator_frontiers(fun: &Function) -> HashMap<ExtLabel, Vec<ExtLabel>> {
+fn function_dominator_frontiers(fun: &IntFunction) ->
+    HashMap<ExtLabel, Vec<ExtLabel>> {
+
     let get_child_num = |node, num| {
-        let block: &BasicBlock = fun.blocks.get(&node).unwrap();
+        let block: &IntBasicBlock = fun.blocks.get(&node).unwrap();
 
         if let Some(cont) = block.continuation {
             if num == 0 {
@@ -241,7 +248,7 @@ fn function_dominator_frontiers(fun: &Function) -> HashMap<ExtLabel, Vec<ExtLabe
     frontiers
 }
 
-fn function_propagate_ssa(fun: &mut Function) {
+fn function_propagate_ssa(fun: &mut IntFunction) {
 
     // Place PHI nodes
     let frontiers = function_dominator_frontiers(fun);
@@ -308,7 +315,8 @@ fn function_propagate_ssa(fun: &mut Function) {
     }
 
     // Perform register read replacement
-    fn propagate_reads(changed: &mut bool, blocks: &mut HashMap<ExtLabel, BasicBlock>,
+    fn propagate_reads(changed: &mut bool,
+                       blocks: &mut HashMap<ExtLabel, IntBasicBlock>,
                        visited: &mut HashSet<ExtLabel>, mut state: ReadPropState,
                        last: ExtLabel, entry: ExtLabel) {
 
@@ -326,9 +334,7 @@ fn function_propagate_ssa(fun: &mut Function) {
             for op in block.ops.iter_mut() {
                 for (idx, source) in op.op.reads.iter().enumerate() {
                     if let &Source::Register(reg) = source {
-                        op.reads[idx] = Some(state.assignments[&reg]);
-                    } else {
-                        op.reads[idx] = None;
+                        op.reads[idx] = SSASource::Register(state.assignments[&reg]);
                     }
                 }
                 for (idx, register) in op.op.writes.iter().enumerate() {
@@ -384,7 +390,7 @@ fn format_label(label: &str) -> String {
 }
 
 use std::io::Write;
-pub fn function_to_dot(function: &Function, w: &mut Write) -> ::std::io::Result<()> {
+pub fn function_to_dot(function: &SSAFunction, w: &mut Write) -> ::std::io::Result<()> {
     write!(w, "digraph g {{\n")?;
     write!(w, "node [labeljust=\"l\", shape=record, fontname=\"Courier New\"]\n")?;
     write!(w, "edge [fontname=\"Courier New\", fontsize=9]\n\n")?;
@@ -398,20 +404,54 @@ pub fn function_to_dot(function: &Function, w: &mut Write) -> ::std::io::Result<
 
         write!(w, "blk_{} [ label=<{}|", block_name, block_name)?;
 
-        let phis = format_label(&format!("{:#?}", block.phi_nodes));
-        write!(w, "phi: {}", phis)?;
-
-        for op in &block.ops {
-            let op_line = format_label(&format!("{:#?}", op));
-            write!(w, "{}{}", DOT_BREAK, op_line)?;
+        for phi in &block.phi_nodes {
+            if phi.dead {
+                continue;
+            }
+            let fmt = format_label(&format!("${}, = PHI[{:?}]",
+                                            phi.output.0, phi.inputs));
+            write!(w, "{}", fmt)?;
         }
+
+        for op in block.ops.iter() {
+            if op.writes.len() > 0 {
+                for write in &op.writes {
+                    write!(w, "${}, ", write.0)?;
+                }
+                write!(w, "= ")?;
+            }
+
+            let body = format_label(&format!("{:?} ", op.kind));
+            write!(w, "{}", body)?;
+
+            if op.reads.len() > 0 {
+                write!(w, "read[")?;
+                for read in op.reads.iter() {
+                    match *read {
+                        SSASource::Register(reg) => write!(w, "${}, ", reg.0)?,
+                        SSASource::Literal(ref lit) => write!(w, "{}", format_label(
+                            &format!("{:?}", lit)))?,
+                    }
+                }
+                write!(w, "] ")?;
+            }
+
+            write!(w, "{}", DOT_BREAK)?;
+        }
+
+        write!(w, "jumps[")?;
+        for label in block.jumps.iter() {
+            write!(w, "{}, ", label.name())?;
+        }
+        write!(w, "] ")?;
+
         write!(w, "> ];\n")?;
 
         if let Some(label) = block.continuation {
             write!(w, "blk_{} -> blk_{} [ label=cont ];\n", block_name, label.name())?;
         }
         for arg in &block.jumps {
-            write!(w, "blk_{} -> blk_o{} [  ];\n", block_name, arg.0)?;
+            write!(w, "blk_{} -> blk_o{} [  ];\n", block_name, arg.name())?;
         }
         write!(w, "\n")?;
     }

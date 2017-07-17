@@ -5,7 +5,49 @@ use ::itertools::Itertools;
 use ::std::rc::Rc;
 
 #[derive(Debug, Clone)]
-pub enum Op {
+pub struct Op {
+    pub reads: Vec<Source>,
+    pub writes: Vec<Register>,
+    pub labels: Vec<LabelId>,
+    pub kind: OpKind,
+}
+impl Op {
+    pub fn empty(kind: OpKind) -> Self {
+        Op {
+            reads: Vec::new(),
+            writes: Vec::new(),
+            labels: Vec::new(),
+            kind: kind,
+        }
+    }
+    pub fn with_reads(kind: OpKind, reads: Vec<Source>) -> Self {
+        Op {
+            reads: reads,
+            writes: Vec::new(),
+            labels: Vec::new(),
+            kind: kind,
+        }
+    }
+    pub fn with_reads_labels(kind: OpKind, reads: Vec<Source>, labels: Vec<LabelId>) -> Self {
+        Op {
+            reads: reads,
+            writes: Vec::new(),
+            labels: labels,
+            kind: kind,
+        }
+    }
+    pub fn with_reads_writes(kind: OpKind, reads: Vec<Source>, writes: Vec<Register>) -> Self {
+        Op {
+            reads: reads,
+            writes: writes,
+            labels: Vec::new(),
+            kind: kind,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum OpKind {
 
     // Info
     Line { num: u32 },
@@ -14,26 +56,28 @@ pub enum Op {
     CodeEnd,
 
     // General
-    Move { source: Source, dest: Register },
+
+    /// Moves r[0] to w[1]
+    Move,
 
     // Functions
     MakeFun2 { lambda: Lambda },
+    /// Read and return reg_x0 from function
     Return,
 
     // Testing
-    UnaryTest { arg1: Source, fail: LabelId, test: UnaryTest },
-    BinaryTest { arg1: Source, arg2: Source, fail: LabelId, test: BinaryTest },
+    UnaryTest { test: UnaryTest },
+    BinaryTest { test: BinaryTest },
     TestHeap { heap_need: u32, live: u32 },
 
     // Calls
-    CallBif0 { bif: Import, dest: Register },
+    /// Call bif with r[..] as args
+    /// Put result into w[0]
+    /// If l[0], go to l[0] on failure
     CallBif {
         /// If Some, gc can occur in BIF. Inner is number of live X registers.
         gc: Option<u32>,
         bif: Import,
-        fail: LabelId,
-        args: BifArgs,
-        dest: Register
     },
     CallExt { arity: u32, import: Import },
     CallExtOnly { arity: u32, import: Import },
@@ -50,16 +94,22 @@ pub enum Op {
     Trim { num: u32 }, // remaining value seems unused
 
     // Term deconstruction
-    GetTupleElem { source: Source, elem: u32, dest: Register },
-    GetMapElems { source: Source, fail: LabelId, entries: Vec<(Literal, Register)> },
+    GetTupleElem { elem: u32 },
+    GetMapElems { entries: Vec<Literal> },
 
     // Term construction
-    PutList { head: Source, tail: Source, dest: Register },
-    PutTuple { arity: u32, dest: Register },
-    PutTupleElem { elem: Source },
+    /// Construct a new list cell with r[0] as head and r[1] as tail
+    /// Put result into w[0]
+    PutList,
+    PutTuple { arity: u32 },
+    PutTupleElem,
 
     // Matching
-    SelectVal { source: Source, fail: LabelId, matches: Vec<(Literal, LabelId)> },
+    /// Matches on r[0]
+    /// Tests against literals in matches, jump to l[n+1] if match
+    /// If no matches, jump to l[0]
+    SelectVal { matches: Vec<Literal> },
+    Jump,
 
     // Errors
     Raise(RaiseType),
@@ -131,7 +181,7 @@ impl ::std::fmt::Debug for LabelId {
 impl Op {
 
     pub fn is_label(&self) -> bool {
-        if let Op::Label { .. } = *self {
+        if let OpKind::Label { .. } = self.kind {
             true
         } else {
             false
@@ -139,86 +189,26 @@ impl Op {
     }
 
     pub fn has_jump(&self) -> bool {
-        match *self {
-            Op::UnaryTest { .. } => true,
-            Op::BinaryTest { .. } => true,
-            Op::CallBif { fail: label, .. } if label != LabelId(0) => true,
-            Op::SelectVal { .. } => true,
-            Op::GetMapElems { .. } => true,
+        match self.kind {
+            OpKind::UnaryTest { .. } => true,
+            OpKind::BinaryTest { .. } => true,
+            OpKind::CallBif { .. } if self.labels.len() != 0 => true,
+            OpKind::SelectVal { .. } => true,
+            OpKind::GetMapElems { .. } => true,
+            OpKind::Try { .. } => true,
+            OpKind::Jump => true,
             _ => false,
         }
     }
 
-    pub fn jumps(&self) -> Option<Vec<LabelId>> {
-        let res = match *self {
-            Op::UnaryTest { fail: label, .. } => vec![label],
-            Op::BinaryTest { fail: label, .. } => vec![label],
-            Op::CallBif { fail: label, .. } => vec![label],
-            Op::SelectVal { fail: label, ref matches, .. } => {
-                let match_labels = matches.iter().map(|m| m.1);
-                ::itertools::put_back(match_labels).with_value(label).collect()
-            }
-            Op::GetMapElems { fail: label, .. } => vec![label],
-            _ => return None,
-        };
-        Some(res)
-    }
-
     pub fn can_continue(&self) -> bool {
-        match *self {
-            Op::Raise(_) => false,
-            Op::Return => false,
-            Op::CallExtLast { .. } => false,
-            Op::CallExtOnly { .. } => false,
+        match self.kind {
+            OpKind::Raise(_) => false,
+            OpKind::Return => false,
+            OpKind::CallExtLast { .. } => false,
+            OpKind::CallExtOnly { .. } => false,
+            OpKind::Jump => false,
             _ => true,
-        }
-    }
-
-    pub fn dests(&self) -> Vec<Register> {
-        match *self {
-            Op::Move { dest, .. } => vec![dest],
-            // MakeFun2
-            Op::CallBif0 { dest, .. } => vec![dest],
-            Op::CallBif { dest, .. } => vec![dest],
-            // Call*
-            Op::GetTupleElem { dest, .. } => vec![dest],
-            Op::GetMapElems { ref entries, .. } =>
-                entries.iter().map(|i| i.1).collect(),
-            Op::PutList { dest, .. } => vec![dest],
-            Op::PutTuple { dest, .. } => vec![dest],
-            Op::Try { exception_ctx, .. } => vec![exception_ctx],
-            _ => vec![],
-        }
-    }
-
-    pub fn srcs(&self) -> Vec<Option<Register>> {
-        fn src2reg(src: &Source) -> Option<Register> {
-            match *src {
-                Source::Register(reg) => Some(reg),
-                _ => None,
-            }
-        }
-
-        match *self {
-            Op::Move { ref source, .. } => vec![src2reg(source)],
-            Op::CallBif { args: BifArgs::Bif1(ref a1), .. } => vec![src2reg(a1)],
-            Op::CallBif { args: BifArgs::Bif2(ref a1, ref a2), .. } =>
-                vec![src2reg(a1), src2reg(a2)],
-            Op::CallExt { arity: n, .. } => (0..n).map(|i| Some(Register::X(i))).collect(),
-            Op::CallExtOnly { arity: n, .. } => (0..n).map(|i| Some(Register::X(i))).collect(),
-            Op::CallExtLast { arity: n, .. } => (0..n).map(|i| Some(Register::X(i))).collect(),
-            Op::GetTupleElem { ref source, .. } => vec![src2reg(source)],
-            Op::GetMapElems { ref source, .. } => vec![src2reg(source)],
-            Op::PutList { ref head, ref tail, .. } => vec![src2reg(head), src2reg(tail)],
-            Op::PutTupleElem { ref elem, .. } => vec![src2reg(elem)],
-            Op::SelectVal { ref source, .. } => vec![src2reg(source)],
-            Op::Raise(RaiseType::Error { ref class, ref value }) =>
-                vec![src2reg(class), src2reg(value)],
-            Op::Raise(RaiseType::BadMatch(ref source)) => vec![src2reg(source)],
-            Op::Raise(RaiseType::CaseEnd(ref source)) => vec![src2reg(source)],
-            Op::TryEnd { exception_ctx } => vec![Some(exception_ctx)],
-            Op::TryCase { exception_ctx } => vec![Some(exception_ctx)],
-            _ => vec![],
         }
     }
 
@@ -229,151 +219,190 @@ impl Op {
 
         match &raw_op.opcode.name {
             n if n == "return" =>
-                Op::Return,
-            n if n == "select_val" =>
-                Op::SelectVal {
-                    source: Source::from_raw(&raw_op.args[0], module).unwrap(),
-                    fail: LabelId(raw_op.args[1].fail_label()),
-                    matches: raw_op.args[2..].iter().tuples()
-                        .map(|(val, lab)| (Literal::from_raw(val, module).unwrap(),
-                                           LabelId(lab.fail_label())))
+                Op::with_reads(OpKind::Return, vec![Source::x_reg(0)]),
+            n if n == "select_val" => {
+                let matches = raw_op.args[2..].iter().tuples()
+                    .map(|(val, lab)| (Literal::from_raw(val, module).unwrap(),
+                                       LabelId(lab.fail_label())))
+                    .collect_vec();
+                Op {
+                    kind: OpKind::SelectVal {
+                        matches: matches.iter().map(|&(ref val, _lab)| val.clone()).collect(),
+                    },
+                    reads: vec![Source::from_raw(&raw_op.args[0], module).unwrap()],
+                    writes: vec![],
+                    labels: ::itertools::put_back(matches.iter().map(|&(ref _val, lab)| lab))
+                        .with_value(LabelId(raw_op.args[1].fail_label()))
                         .collect(),
-                },
+                }
+            }
             n if n == "move" =>
-                Op::Move {
-                    source: Source::from_raw(&raw_op.args[0], module).unwrap(),
-                    dest: Register::from_raw(&raw_op.args[1]).unwrap(),
-                },
+                Op::with_reads_writes(OpKind::Move,
+                                      vec![Source::from_raw(&raw_op.args[0], module).unwrap()],
+                                      vec![Register::from_raw(&raw_op.args[1]).unwrap()]),
             n if n == "line" =>
-                Op::Line {
+                Op::empty(OpKind::Line {
                     num: raw_op.args[0].untagged(),
-                },
+                }),
             n if n == "label" =>
-                Op::Label {
+                Op::empty(OpKind::Label {
                     num: LabelId(raw_op.args[0].untagged()),
-                },
+                }),
             n if n == "func_info" =>
-                Op::FuncInfo {
+                Op::empty(OpKind::FuncInfo {
                     module: atoms[raw_op.args[0].atom() as usize - 1].clone(),
                     function: atoms[raw_op.args[1].atom() as usize - 1].clone(),
                     arity: raw_op.args[2].untagged(),
-                },
+                }),
             n if n == "call_ext_only" =>
-                Op::CallExtOnly {
+                Op::empty(OpKind::CallExtOnly {
                     arity: raw_op.args[0].untagged(),
                     import: imports[raw_op.args[1].untagged() as usize].clone(),
-                },
+                }),
             n if n == "call_ext" =>
-                Op::CallExt {
+                Op::empty(OpKind::CallExt {
                     arity: raw_op.args[0].untagged(),
                     import: imports[raw_op.args[1].untagged() as usize].clone(),
-                },
+                }),
             n if n == "call_ext_last" =>
-                Op::CallExtLast {
+                Op::empty(OpKind::CallExtLast {
                     arity: raw_op.args[0].untagged(),
                     import: imports[raw_op.args[1].untagged() as usize].clone(),
                     deallocate: raw_op.args[2].untagged(),
-                },
-            n if n == "bif0" =>
-                Op::CallBif0 {
+                }),
+            n if n == "bif0" => Op {
+                kind: OpKind::CallBif {
                     bif: imports[raw_op.args[0].untagged() as usize].clone(),
-                    dest: Register::from_raw(&raw_op.args[1]).unwrap(),
-                },
-            n if n == "bif1" =>
-                Op::CallBif {
-                    fail: LabelId(raw_op.args[0].fail_label()),
-                    bif: imports[raw_op.args[1].untagged() as usize].clone(),
-                    args: BifArgs::Bif1(Source::from_raw(&raw_op.args[2], module).unwrap()),
-                    dest: Register::from_raw(&raw_op.args[3]).unwrap(),
                     gc: None,
                 },
-            n if n == "bif2" =>
-                Op::CallBif {
-                    fail: LabelId(raw_op.args[0].fail_label()),
-                    bif: imports[raw_op.args[1].untagged() as usize].clone(),
-                    args: BifArgs::Bif2(Source::from_raw(&raw_op.args[2], module).unwrap(),
-                                        Source::from_raw(&raw_op.args[3], module).unwrap()),
-                    dest: Register::from_raw(&raw_op.args[4]).unwrap(),
-                    gc: None,
-                },
-            n if n == "gc_bif1" =>
-                Op::CallBif {
-                    fail: LabelId(raw_op.args[0].fail_label()),
-                    gc: Some(raw_op.args[1].untagged()),
-                    bif: imports[raw_op.args[2].untagged() as usize].clone(),
-                    args: BifArgs::Bif1(Source::from_raw(&raw_op.args[3], module).unwrap()),
-                    dest: Register::from_raw(&raw_op.args[4]).unwrap(),
-                },
-            n if n == "gc_bif2" =>
-                Op::CallBif {
-                    fail: LabelId(raw_op.args[0].fail_label()),
-                    gc: Some(raw_op.args[1].untagged()),
-                    bif: imports[raw_op.args[2].untagged() as usize].clone(),
-                    args: BifArgs::Bif2(Source::from_raw(&raw_op.args[3], module).unwrap(),
-                                        Source::from_raw(&raw_op.args[4], module).unwrap()),
-                    dest: Register::from_raw(&raw_op.args[5]).unwrap(),
-                },
+                reads: vec![],
+                writes: vec![Register::from_raw(&raw_op.args[1]).unwrap()],
+                labels: vec![],
+            },
+            n if n == "bif1" => {
+                let label = raw_op.args[0].fail_label();
+                Op {
+                    kind: OpKind::CallBif {
+                        gc: None,
+                        bif: imports[raw_op.args[1].untagged() as usize].clone(),
+                    },
+                    reads: vec![Source::from_raw(&raw_op.args[2], module).unwrap()],
+                    writes: vec![Register::from_raw(&raw_op.args[3]).unwrap()],
+                    labels: if label == 0 { vec![] } else { vec![LabelId(label)] },
+                }
+            }
+            n if n == "bif2" => {
+                let label = raw_op.args[0].fail_label();
+                Op {
+                    kind: OpKind::CallBif {
+                        gc: None,
+                        bif: imports[raw_op.args[1].untagged() as usize].clone(),
+                    },
+                    reads: vec![Source::from_raw(&raw_op.args[2], module).unwrap(),
+                                Source::from_raw(&raw_op.args[3], module).unwrap()],
+                    writes: vec![Register::from_raw(&raw_op.args[4]).unwrap()],
+                    labels: if label == 0 { vec![] } else { vec![LabelId(label)] },
+                }
+            }
+            n if n == "gc_bif1" => {
+                let label = raw_op.args[0].fail_label();
+                Op {
+                    kind: OpKind::CallBif {
+                        gc: Some(raw_op.args[1].untagged()),
+                        bif: imports[raw_op.args[2].untagged() as usize].clone(),
+                    },
+                    reads: vec![Source::from_raw(&raw_op.args[3], module).unwrap()],
+                    writes: vec![Register::from_raw(&raw_op.args[4]).unwrap()],
+                    labels: if label == 0 { vec![] } else { vec![LabelId(label)] },
+                }
+            }
+            n if n == "gc_bif2" => {
+                let label = raw_op.args[0].fail_label();
+                Op {
+                    kind: OpKind::CallBif {
+                        gc: Some(raw_op.args[1].untagged()),
+                        bif: imports[raw_op.args[2].untagged() as usize].clone(),
+                    },
+                    reads: vec![Source::from_raw(&raw_op.args[3], module).unwrap(),
+                                Source::from_raw(&raw_op.args[4], module).unwrap()],
+                    writes: vec![Register::from_raw(&raw_op.args[5]).unwrap()],
+                    labels: if label == 0 { vec![] } else { vec![LabelId(label)] },
+                }
+            }
             n if n == "allocate" =>
-                Op::Allocate {
+                Op::empty(OpKind::Allocate {
                     stack_need: raw_op.args[0].untagged(),
                     live: raw_op.args[1].untagged(),
                     stack_zero: false,
                     heap_need: None,
-                },
+                }),
             n if n == "deallocate" =>
-                Op::Deallocate { num: raw_op.args[0].untagged() },
+                Op::empty(OpKind::Deallocate { num: raw_op.args[0].untagged() }),
             n if n == "allocate_heap" =>
-                Op::Allocate {
+                Op::empty(OpKind::Allocate {
                     stack_need: raw_op.args[0].untagged(),
                     heap_need: Some(raw_op.args[1].untagged()),
                     live: raw_op.args[2].untagged(),
                     stack_zero: false,
-                },
+                }),
             n if n == "allocate_zero" =>
-                Op::Allocate {
+                Op::empty(OpKind::Allocate {
                     stack_need: raw_op.args[0].untagged(),
                     live: raw_op.args[1].untagged(),
                     stack_zero: true,
                     heap_need: None,
-                },
+                }),
             n if n == "allocate_heap_zero" =>
-                Op::Allocate {
+                Op::empty(OpKind::Allocate {
                     stack_need: raw_op.args[0].untagged(),
                     heap_need: Some(raw_op.args[1].untagged()),
                     live: raw_op.args[2].untagged(),
                     stack_zero: true,
-                },
+                }),
             n if n == "trim" =>
-                Op::Trim { num: raw_op.args[0].untagged() },
+                Op::empty(OpKind::Trim { num: raw_op.args[0].untagged() }),
+            // TODO
             n if n == "make_fun2" =>
-                Op::MakeFun2 {
+                Op::empty(OpKind::MakeFun2 {
                     lambda: lambdas[raw_op.args[0].untagged() as usize].clone()
-                },
+                }),
             n if n == "test_heap" =>
-                Op::TestHeap {
+                Op::empty(OpKind::TestHeap {
                     heap_need: raw_op.args[0].untagged(),
                     live: raw_op.args[1].untagged(),
-                },
+                }),
             n if n == "put_list" =>
-                Op::PutList {
-                    head: Source::from_raw(&raw_op.args[0], module).unwrap(),
-                    tail: Source::from_raw(&raw_op.args[1], module).unwrap(),
-                    dest: Register::from_raw(&raw_op.args[2]).unwrap(),
+                Op {
+                    kind: OpKind::PutList,
+                    reads: vec![Source::from_raw(&raw_op.args[0], module).unwrap(),
+                                Source::from_raw(&raw_op.args[1], module).unwrap()],
+                    writes: vec![Register::from_raw(&raw_op.args[2]).unwrap()],
+                    labels: vec![],
                 },
             n if n == "put_tuple" =>
-                Op::PutTuple {
-                    arity: raw_op.args[0].untagged(),
-                    dest: Register::from_raw(&raw_op.args[1]).unwrap(),
+                Op {
+                    kind: OpKind::PutTuple {
+                        arity: raw_op.args[0].untagged(),
+                    },
+                    reads: vec![],
+                    writes: vec![Register::from_raw(&raw_op.args[1]).unwrap()],
+                    labels: vec![],
                 },
             n if n == "put" =>
-                Op::PutTupleElem {
-                    elem: Source::from_raw(&raw_op.args[0], module).unwrap(),
+                Op {
+                    kind: OpKind::PutTupleElem,
+                    reads: vec![Source::from_raw(&raw_op.args[0], module).unwrap()],
+                    writes: vec![],
+                    labels: vec![],
                 },
             n if n == "get_tuple_element" =>
-                Op::GetTupleElem {
-                    source: Source::from_raw(&raw_op.args[0], module).unwrap(),
-                    elem: raw_op.args[1].untagged(),
-                    dest: Register::from_raw(&raw_op.args[2]).unwrap(),
+                Op {
+                    kind: OpKind::GetTupleElem {
+                        elem: raw_op.args[1].untagged(),
+                    },
+                    reads: vec![Source::from_raw(&raw_op.args[0], module).unwrap()],
+                    writes: vec![Register::from_raw(&raw_op.args[2]).unwrap()],
+                    labels: vec![],
                 },
             n if n == "is_integer" => make_unary_test(raw_op, UnaryTest::Integer, module),
             n if n == "is_float" => make_unary_test(raw_op, UnaryTest::Float, module),
@@ -399,45 +428,61 @@ impl Op {
             n if n == "is_eq_exact" => make_binary_test(raw_op, BinaryTest::IsEqExact, module),
             n if n == "is_ne_exact" => make_binary_test(raw_op, BinaryTest::IsNeExact, module),
             n if n == "badmatch" =>
-                Op::Raise(RaiseType::BadMatch(
-                    Source::from_raw(&raw_op.args[0], module).unwrap())),
+                Op::empty(OpKind::Raise(RaiseType::BadMatch(
+                    Source::from_raw(&raw_op.args[0], module).unwrap()))),
             n if n == "if_end" =>
-                Op::Raise(RaiseType::IfEnd),
+                Op::empty(OpKind::Raise(RaiseType::IfEnd)),
             n if n == "case_end" =>
-                Op::Raise(RaiseType::CaseEnd(
-                    Source::from_raw(&raw_op.args[0], module).unwrap())),
+                Op::empty(OpKind::Raise(RaiseType::CaseEnd(
+                    Source::from_raw(&raw_op.args[0], module).unwrap()))),
             n if n == "int_code_end" =>
-                Op::CodeEnd,
-            n if n == "get_map_elements" =>
-                Op::GetMapElems {
-                    fail: LabelId(raw_op.args[0].fail_label()),
-                    source: Source::from_raw(&raw_op.args[1], module).unwrap(),
-                    entries: raw_op.args[2..].iter().tuples()
-                        .map(|(key, reg)| (Literal::from_raw(key, module).unwrap(),
-                                           Register::from_raw(reg).unwrap()))
-                        .collect(),
-                },
+                Op::empty(OpKind::CodeEnd),
+            n if n == "get_map_elements" => {
+                let entries = raw_op.args[2..].iter().tuples()
+                    .map(|(key, reg)| (Literal::from_raw(key, module).unwrap(),
+                                       Register::from_raw(reg).unwrap()))
+                    .collect_vec();
+                Op {
+                    kind: OpKind::GetMapElems {
+                        entries: entries.iter().map(|&(ref lit, _)| lit.clone()).collect(),
+                    },
+                    reads: vec![Source::from_raw(&raw_op.args[1], module).unwrap()],
+                    writes: entries.iter().map(|&(_, reg)| reg).collect(),
+                    labels: vec![LabelId(raw_op.args[0].fail_label())],
+                }
+            },
             n if n == "try" =>
-                Op::Try {
-                    exception_ctx: Register::from_raw(&raw_op.args[0]).unwrap(),
-                    landing_pad: LabelId(raw_op.args[1].fail_label()),
+                Op {
+                    kind: OpKind::Try {
+                        exception_ctx: Register::from_raw(&raw_op.args[0]).unwrap(),
+                        landing_pad: LabelId(raw_op.args[1].fail_label()),
+                    },
+                    reads: vec![],
+                    writes: vec![],
+                    labels: vec![LabelId(raw_op.args[1].fail_label())],
                 },
             n if n == "try_end" =>
-                Op::TryEnd {
+                Op::empty(OpKind::TryEnd {
                     exception_ctx: Register::from_raw(&raw_op.args[0]).unwrap()
-                },
+                }),
             n if n == "try_case" =>
-                Op::TryCase {
+                Op::empty(OpKind::TryCase {
                     exception_ctx: Register::from_raw(&raw_op.args[0]).unwrap()
-                },
+                }),
             n if n == "raise" =>
-                Op::Raise(RaiseType::Error {
+                Op::empty(OpKind::Raise(RaiseType::Error {
                     value: Source::from_raw(&raw_op.args[0], module).unwrap(),
                     class: Source::from_raw(&raw_op.args[1], module).unwrap(),
-                }),
+                })),
+            n if n == "jump" => Op {
+                kind: OpKind::Jump,
+                labels: vec![LabelId(raw_op.args[0].fail_label())],
+                reads: vec![],
+                writes: vec![],
+            },
             _ => {
                 println!("Unknown instruction: {:#?}", raw_op);
-                Op::Unknown(raw_op.clone())
+                Op::empty(OpKind::Unknown(raw_op.clone()))
             }
         }
     }
@@ -445,19 +490,23 @@ impl Op {
 }
 
 fn make_unary_test(raw_op: &RawOp, test: UnaryTest, module: &Module) -> Op {
-    Op::UnaryTest {
-        test: test,
-        fail: LabelId(raw_op.args[0].fail_label()),
-        arg1: Source::from_raw(&raw_op.args[1], module).unwrap(),
-    }
+    Op::with_reads_labels(
+        OpKind::UnaryTest {
+            test: test,
+        },
+        vec![Source::from_raw(&raw_op.args[1], module).unwrap()],
+        vec![LabelId(raw_op.args[0].fail_label())]
+    )
 }
 fn make_binary_test(raw_op: &RawOp, test: BinaryTest, module: &Module) -> Op {
-    Op::BinaryTest {
-        test: test,
-        fail: LabelId(raw_op.args[0].fail_label()),
-        arg1: Source::from_raw(&raw_op.args[1], module).unwrap(),
-        arg2: Source::from_raw(&raw_op.args[2], module).unwrap(),
-    }
+    Op::with_reads_labels(
+        OpKind::BinaryTest {
+            test: test,
+        },
+        vec![Source::from_raw(&raw_op.args[1], module).unwrap(),
+             Source::from_raw(&raw_op.args[2], module).unwrap()],
+        vec![LabelId(raw_op.args[0].fail_label())]
+    )
 }
 
 #[derive(Clone)]
@@ -478,6 +527,10 @@ impl Source {
     fn from_raw(raw: &RawOpArg, module: &Module) -> Option<Source> {
         Register::from_raw(raw).map(|r| Source::Register(r))
             .or_else(|| Literal::from_raw(raw, module).map(|r| Source::Literal(r)))
+    }
+
+    fn x_reg(num: u32) -> Source {
+        Source::Register(Register::X(num))
     }
 
 }
@@ -525,7 +578,7 @@ impl Literal {
 
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash)]
 pub enum Register {
     X(u32),
     Y(u32),

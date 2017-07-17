@@ -5,11 +5,16 @@ defmodule Test do
   #end
 
   def add_catch(a, b) do
-    try do
-      a + b
-    rescue
-      ArithmeticError -> :error
+    #try do
+    #  a + b
+    #rescue
+    #  ArithmeticError -> :error
+    #end
+    c = case a do
+      {:woo, 12} -> 9
+      {:hoo, 11} -> 8
     end
+    c + b
   end
 
   #def complex(l) do
@@ -52,5 +57,9 @@ defmodule Test do
   #def tuple_elem(a, b) do
   #  elem(a, b)
   #end
+
+  def lambda(bound) do
+    fn (a) -> bound + a end
+  end
 
 end

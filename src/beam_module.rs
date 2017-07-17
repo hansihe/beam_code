@@ -82,10 +82,10 @@ impl ::std::fmt::Debug for AtomInner {
 pub type Export = Rc<ExportInner>;
 #[derive(Debug)]
 pub struct ExportInner {
-    id: u32,
-    function: Atom,
-    arity: u32,
-    label: u32,
+    pub id: u32,
+    pub function: Atom,
+    pub arity: u32,
+    pub label: u32,
 }
 
 pub type Import = Rc<ImportInner>;
@@ -100,12 +100,12 @@ pub struct ImportInner {
 pub type Lambda = Rc<LambdaInner>;
 #[derive(Debug)]
 pub struct LambdaInner {
-    id: u32,
-    function: Atom,
-    arity: u32,
-    label: u32,
-    index: u32,
-    num_free: u32,
+    pub id: u32,
+    pub function: Atom,
+    pub arity: u32,
+    pub label: u32,
+    pub index: u32,
+    pub num_free: u32,
 }
 
 #[derive(Debug)]

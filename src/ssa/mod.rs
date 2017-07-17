@@ -249,6 +249,7 @@ fn function_dominator_frontiers(fun: &IntFunction) ->
 }
 
 fn function_propagate_ssa(fun: &mut IntFunction) {
+    println!("{:?}/{}", fun.name, fun.arity);
 
     // Place PHI nodes
     let frontiers = function_dominator_frontiers(fun);
@@ -334,6 +335,7 @@ fn function_propagate_ssa(fun: &mut IntFunction) {
             for op in block.ops.iter_mut() {
                 for (idx, source) in op.op.reads.iter().enumerate() {
                     if let &Source::Register(reg) = source {
+                        //println!("{:?}, {:?}, {:?}", reg, op.reads, state.assignments);
                         op.reads[idx] = SSASource::Register(state.assignments[&reg]);
                     }
                 }

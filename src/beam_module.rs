@@ -27,7 +27,7 @@ impl Module {
             println!("Chunk: {}", from_utf8(&chunk.id).unwrap());
         }
 
-        let atoms_raw = file.chunks.iter().find(|c| &c.id == b"AtU8").unwrap();
+        let atoms_raw = file.chunks.iter().find(|c| &c.id == b"AtU8" || &c.id == b"Atom").unwrap();
         let atoms = read_atoms(&atoms_raw.data);
 
         let exports_raw = file.chunks.iter().find(|c| &c.id == b"ExpT").unwrap();
@@ -70,8 +70,8 @@ impl Module {
 
 pub type Atom = Rc<AtomInner>;
 pub struct AtomInner {
-    id: u32,
-    string: String,
+    pub id: u32,
+    pub string: String,
 }
 impl ::std::fmt::Debug for AtomInner {
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {

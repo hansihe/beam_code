@@ -57,18 +57,25 @@ pub enum OpKind {
 
     // General
 
-    /// Moves r[0] to w[1]
+    /// Moves r[0] to w[0]
     Move,
+    /// Writes NIL to w[0]
+    Init,
 
     // Functions
     MakeFun2 { lambda: Lambda },
     /// Read and return reg_x0 from function
     Return,
+    /// Arguments in regs x[0..arity], fun in x[arity]
+    CallFun { arity: u32 },
 
     // Testing
     UnaryTest { test: UnaryTest },
     BinaryTest { test: BinaryTest },
     TestHeap { heap_need: u32, live: u32 },
+    /// test r[0] for r[1..] keys, jump to l[0] on fail
+    HasMapFields,
+    TupleArity { matches: Vec<u32> },
 
     // Calls
     /// Call bif with r[..] as args
@@ -82,6 +89,9 @@ pub enum OpKind {
     CallExt { arity: u32, import: Import },
     CallExtOnly { arity: u32, import: Import },
     CallExtLast { arity: u32, import: Import, deallocate: u32 },
+    Call { arity: u32, fun_label: LabelId },
+    CallOnly { arity: u32, fun_label: LabelId },
+    CallLast { arity: u32, fun_label: LabelId, deallocate: u32 },
 
     // Allocation
     Allocate {
@@ -95,7 +105,9 @@ pub enum OpKind {
 
     // Term deconstruction
     GetTupleElem { elem: u32 },
-    GetMapElems { entries: Vec<Literal> },
+    GetMapElems { entries: Vec<Source> }, // FIXME: Add registers to read list
+    /// Get list from r[0], move head into w[0], tail into w[1]
+    GetList,
 
     // Term construction
     /// Construct a new list cell with r[0] as head and r[1] as tail
@@ -153,8 +165,11 @@ pub enum UnaryTest {
     NonemptyList,
     Tuple,
     Map,
+    Boolean,
+    Function,
 
     Arity(u32),
+    FunctionArity(u32),
     TaggedTuple {
         arity: u32,
         atom: AtomLiteral,
@@ -192,6 +207,7 @@ impl Op {
     }
 
     pub fn has_jump(&self) -> bool {
+        //self.labels.len() != 0
         match self.kind {
             OpKind::UnaryTest { .. } => true,
             OpKind::BinaryTest { .. } => true,
@@ -212,6 +228,9 @@ impl Op {
             OpKind::CallExtOnly { .. } => false,
             OpKind::Jump => false,
             OpKind::SelectVal { .. } => false, // Is this right? Can label be 0?
+            OpKind::CallLast { .. } => false,
+            OpKind::CallOnly { .. } => false,
+            OpKind::TupleArity { .. } => false,
             _ => true,
         }
     }
@@ -244,6 +263,9 @@ impl Op {
                 Op::with_reads_writes(OpKind::Move,
                                       vec![Source::from_raw(&raw_op.args[0], module).unwrap()],
                                       vec![Register::from_raw(&raw_op.args[1]).unwrap()]),
+            n if n == "init" =>
+                Op::with_reads_writes(OpKind::Init, vec![], vec![
+                    Register::from_raw(&raw_op.args[0]).unwrap()]),
             n if n == "line" =>
                 Op::empty(OpKind::Line {
                     num: raw_op.args[0].untagged(),
@@ -258,6 +280,31 @@ impl Op {
                     function: atoms[raw_op.args[1].atom() as usize - 1].clone(),
                     arity: raw_op.args[2].untagged(),
                 }),
+            n if n == "has_map_fields" =>
+                Op::with_reads_labels(
+                    OpKind::HasMapFields,
+                    raw_op.args[1..].iter()
+                        .map(|v| Source::from_raw(v, module).unwrap())
+                        .collect(),
+                    vec![LabelId(raw_op.args[0].fail_label())]
+                ),
+            n if n == "select_tuple_arity" => {
+                let matches = raw_op.args[2..].iter().tuples()
+                    .map(|(val, lab)| (val.untagged(),
+                                       LabelId(lab.fail_label())))
+                    .collect_vec();
+                Op {
+                    kind: OpKind::TupleArity {
+                        matches: matches.iter().map(|&(val, _)| val).collect(),
+                    },
+                    reads: vec![Source::from_raw(&raw_op.args[0], module).unwrap()],
+                    writes: vec![],
+                    labels: ::itertools::put_back(matches.iter().map(|&(_, lab)| lab))
+                        .with_value(LabelId(raw_op.args[1].fail_label()))
+                        .collect(),
+                }
+            }
+            // FIXME read registers
             n if n == "call_ext_only" =>
                 Op::empty(OpKind::CallExtOnly {
                     arity: raw_op.args[0].untagged(),
@@ -274,6 +321,37 @@ impl Op {
                     import: imports[raw_op.args[1].untagged() as usize].clone(),
                     deallocate: raw_op.args[2].untagged(),
                 }),
+            n if n == "call" => {
+                let arity = raw_op.args[0].untagged();
+                Op::with_reads(
+                    OpKind::Call {
+                        arity: arity,
+                        fun_label: LabelId(raw_op.args[1].fail_label()),
+                    },
+                    (0..arity).map(|r| Source::Register(Register::X(r))).collect()
+                )
+            }
+            n if n == "call_only" => {
+                let arity = raw_op.args[0].untagged();
+                Op::with_reads(
+                    OpKind::CallOnly {
+                        arity: arity,
+                        fun_label: LabelId(raw_op.args[1].fail_label()),
+                    },
+                    (0..arity).map(|r| Source::Register(Register::X(r))).collect()
+                )
+            }
+            n if n == "call_last" => {
+                let arity = raw_op.args[0].untagged();
+                Op::with_reads(
+                    OpKind::CallLast {
+                        arity: arity,
+                        fun_label: LabelId(raw_op.args[1].fail_label()),
+                        deallocate: raw_op.args[2].untagged(),
+                    },
+                    (0..arity).map(|r| Source::Register(Register::X(r))).collect()
+                )
+            }
             n if n == "bif0" => Op {
                 kind: OpKind::CallBif {
                     bif: imports[raw_op.args[0].untagged() as usize].clone(),
@@ -370,6 +448,15 @@ impl Op {
                 Op::empty(OpKind::MakeFun2 {
                     lambda: lambdas[raw_op.args[0].untagged() as usize].clone()
                 }),
+            n if n == "call_fun" => {
+                let arity = raw_op.args[0].untagged();
+                Op {
+                    kind: OpKind::CallFun { arity: arity },
+                    labels: vec![],
+                    writes: vec![Register::X(0)], // TODO: Unsure?
+                    reads: (0..(arity+1)).map(|n| Source::Register(Register::X(n))).collect(),
+                }
+            }
             n if n == "test_heap" =>
                 Op::empty(OpKind::TestHeap {
                     heap_need: raw_op.args[0].untagged(),
@@ -408,6 +495,14 @@ impl Op {
                     writes: vec![Register::from_raw(&raw_op.args[2]).unwrap()],
                     labels: vec![],
                 },
+            n if n == "get_list" => {
+                Op::with_reads_writes(
+                    OpKind::GetList,
+                    vec![Source::from_raw(&raw_op.args[0], module).unwrap()],
+                    vec![Register::from_raw(&raw_op.args[1]).unwrap(),
+                         Register::from_raw(&raw_op.args[2]).unwrap()]
+                )
+            }
             n if n == "is_integer" => make_unary_test(raw_op, UnaryTest::Integer, module),
             n if n == "is_float" => make_unary_test(raw_op, UnaryTest::Float, module),
             n if n == "is_number" => make_unary_test(raw_op, UnaryTest::Number, module),
@@ -421,6 +516,8 @@ impl Op {
             n if n == "is_nonempty_list" => make_unary_test(raw_op, UnaryTest::NonemptyList, module),
             n if n == "is_tuple" => make_unary_test(raw_op, UnaryTest::Tuple, module),
             n if n == "is_map" => make_unary_test(raw_op, UnaryTest::Map, module),
+            n if n == "is_boolean" => make_unary_test(raw_op, UnaryTest::Boolean, module),
+            n if n == "is_function" => make_unary_test(raw_op, UnaryTest::Function, module),
             n if n == "test_arity" => make_unary_test(raw_op, UnaryTest::Arity(
                 raw_op.args[2].untagged()), module),
             n if n == "is_tagged_tuple" => {
@@ -429,6 +526,12 @@ impl Op {
                     atom: AtomLiteral::from_raw(&raw_op.args[3], module).unwrap(),
                 }, module)
             }
+            n if n == "is_function2" =>
+                make_unary_test(raw_op, UnaryTest::FunctionArity(raw_op.args[2].integer()), module),
+            n if n == "is_eq" => make_binary_test(raw_op, BinaryTest::IsEq, module),
+            n if n == "is_ne" => make_binary_test(raw_op, BinaryTest::IsNe, module),
+            n if n == "is_ge" => make_binary_test(raw_op, BinaryTest::IsGe, module),
+            n if n == "is_lt" => make_binary_test(raw_op, BinaryTest::IsLt, module),
             n if n == "is_eq_exact" => make_binary_test(raw_op, BinaryTest::IsEqExact, module),
             n if n == "is_ne_exact" => make_binary_test(raw_op, BinaryTest::IsNeExact, module),
             n if n == "badmatch" =>
@@ -446,8 +549,9 @@ impl Op {
             n if n == "int_code_end" =>
                 Op::empty(OpKind::CodeEnd),
             n if n == "get_map_elements" => {
+                println!("{:?}", raw_op.args);
                 let entries = raw_op.args[2..].iter().tuples()
-                    .map(|(key, reg)| (Literal::from_raw(key, module).unwrap(),
+                    .map(|(key, reg)| (Source::from_raw(key, module).unwrap(),
                                        Register::from_raw(reg).unwrap()))
                     .collect_vec();
                 Op {

@@ -28,18 +28,18 @@ fn main() {
 
     let file = RawBeamFile::from_file("test_data/Elixir.Test.beam").unwrap();
     let module = Module::from_beam_file(&file, &gen_op_table);
-    println!("{:#?}", module);
+    //println!("{:#?}", module);
 
     let code: Vec<Op> = module.code.iter()
         .map(|o| op::Op::from_raw(o, &module))
         .collect();
-    println!("{:#?}", code);
+    //println!("{:#?}", code);
 
     let functions = ssa::code_to_functions(&code, &module);
     println!("{:?}", functions);
 
     let mut dot_out = std::fs::File::create("cfg.dot").unwrap();
-    ssa::function_to_dot(&functions[4], &mut dot_out).unwrap();
+    ssa::function_to_dot(&functions[4], &mut dot_out).unwrap(); // 34
 
 
 }

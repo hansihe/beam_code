@@ -100,6 +100,13 @@ pub enum RawOpArg {
     Literal(u32),
 }
 impl RawOpArg {
+    pub fn integer(&self) -> u32 {
+        match *self {
+            RawOpArg::Untagged(i) => i,
+            RawOpArg::Integer(i) => i,
+            _ => panic!(),
+        }
+    }
     pub fn untagged(&self) -> u32 {
         match *self {
             RawOpArg::Untagged(i) => i,

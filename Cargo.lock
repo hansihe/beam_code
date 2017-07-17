@@ -1,5 +1,5 @@
 [root]
-name = "beam_compile"
+name = "beam_code"
 version = "0.1.0"
 dependencies = [
  "beam_file 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)",

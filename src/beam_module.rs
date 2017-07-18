@@ -69,6 +69,7 @@ impl Module {
 }
 
 pub type Atom = Rc<AtomInner>;
+#[derive(PartialEq, Eq, Hash)]
 pub struct AtomInner {
     pub id: u32,
     pub string: String,
@@ -91,10 +92,10 @@ pub struct ExportInner {
 pub type Import = Rc<ImportInner>;
 #[derive(Debug)]
 pub struct ImportInner {
-    id: u32,
-    module: Atom,
-    function: Atom,
-    arity: u32,
+    pub id: u32,
+    pub module: Atom,
+    pub function: Atom,
+    pub arity: u32,
 }
 
 pub type Lambda = Rc<LambdaInner>;

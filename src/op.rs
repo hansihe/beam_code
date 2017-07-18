@@ -214,6 +214,7 @@ impl Op {
             OpKind::CallBif { .. } if self.labels.len() != 0 => true,
             OpKind::SelectVal { .. } => true,
             OpKind::GetMapElems { .. } => true,
+            OpKind::HasMapFields { .. } => true,
             OpKind::Try { .. } => true,
             OpKind::Jump => true,
             _ => false,
@@ -224,6 +225,9 @@ impl Op {
         match self.kind {
             OpKind::Raise(_) => false,
             OpKind::Return => false,
+            // Special case, :erlang.error BIF never returns
+            OpKind::CallExt { ref import, .. } if import.module.string == "erlang"
+                && import.function.string == "error" => false,
             OpKind::CallExtLast { .. } => false,
             OpKind::CallExtOnly { .. } => false,
             OpKind::Jump => false,
@@ -549,7 +553,6 @@ impl Op {
             n if n == "int_code_end" =>
                 Op::empty(OpKind::CodeEnd),
             n if n == "get_map_elements" => {
-                println!("{:?}", raw_op.args);
                 let entries = raw_op.args[2..].iter().tuples()
                     .map(|(key, reg)| (Source::from_raw(key, module).unwrap(),
                                        Register::from_raw(reg).unwrap()))
@@ -648,7 +651,7 @@ impl Source {
 
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AtomLiteral {
     AtomNil,
     Atom(Atom),
@@ -663,7 +666,7 @@ impl AtomLiteral {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Literal {
     Atom(AtomLiteral),
     Integer(u32),

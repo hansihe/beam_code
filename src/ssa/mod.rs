@@ -189,7 +189,7 @@ pub fn code_to_functions(code: &[Op], module: &Module) -> Vec<SSAFunction> {
 
     // Clean up
     let cleaned = functions.iter().map(|f| {
-        SSAFunction {
+        let mut ssa_fun = SSAFunction {
             name: f.name.clone(),
             arity: f.arity,
             num_free: f.num_free,
@@ -204,18 +204,25 @@ pub fn code_to_functions(code: &[Op], module: &Module) -> Vec<SSAFunction> {
                     phi_nodes: block.phi_nodes.values().cloned().collect(),
                     ops: block.ops.iter().enumerate().map(|(op_num, op)| {
                         if op_num != block.ops.len()-1 {
+                            println!("{:?}", op);
                             assert!(op.op.labels.len() == 0);
                         }
                         SSAOp {
                             kind: op.op.kind.clone(),
                             reads: op.reads.clone(),
                             writes: op.writes.clone(),
+                            w: op.op.writes.clone(),
+                            r: op.op.reads.clone(),
                         }
                     }).collect(),
                 };
                 (*label, res)
             }).collect(),
-        }
+        };
+
+        ssa_fun.clean();
+
+        ssa_fun
     }).collect();
 
     cleaned
@@ -316,10 +323,12 @@ fn function_propagate_ssa(fun: &mut IntFunction) {
     }
 
     // Perform register read replacement
-    fn propagate_reads(changed: &mut bool,
+    fn propagate_reads(level: usize, changed: &mut bool,
                        blocks: &mut HashMap<ExtLabel, IntBasicBlock>,
                        visited: &mut HashSet<ExtLabel>, mut state: ReadPropState,
                        last: ExtLabel, entry: ExtLabel) {
+
+        println!("{}: {:?} {:?}", level, entry, state);
 
         {
             let block = blocks.get_mut(&entry).unwrap();
@@ -328,7 +337,7 @@ fn function_propagate_ssa(fun: &mut IntFunction) {
                     // input to phi not assigned, this phi node can't exist!
                     phi.dead = true;
                 } else {
-                    phi.inputs.insert(last, state.assignments[register]);
+                    phi.inputs.insert(last, SSASource::Register(state.assignments[register]));
                     *state.assignments.get_mut(register).unwrap() = phi.output;
                 }
             }
@@ -336,6 +345,7 @@ fn function_propagate_ssa(fun: &mut IntFunction) {
                 for (idx, source) in op.op.reads.iter().enumerate() {
                     if let &Source::Register(reg) = source {
                         //println!("{:?}, {:?}, {:?}", reg, op.reads, state.assignments);
+                        println!("read: {:?}", reg);
                         op.reads[idx] = SSASource::Register(state.assignments[&reg]);
                     }
                 }
@@ -359,7 +369,7 @@ fn function_propagate_ssa(fun: &mut IntFunction) {
         }
 
         for child in children {
-            propagate_reads(changed, blocks, visited, state.clone(), entry, child);
+            propagate_reads(level+1, changed, blocks, visited, state.clone(), entry, child);
         }
 
     }
@@ -374,7 +384,7 @@ fn function_propagate_ssa(fun: &mut IntFunction) {
     while changed {
         changed = false;
         let mut visited = HashSet::new();
-        propagate_reads(&mut changed, &mut fun.blocks, &mut visited,
+        propagate_reads(0, &mut changed, &mut fun.blocks, &mut visited,
                         read_prop_state.clone(), fun.entry, fun.entry);
     }
 
@@ -395,7 +405,7 @@ use std::io::Write;
 pub fn function_to_dot(function: &SSAFunction, w: &mut Write) -> ::std::io::Result<()> {
     write!(w, "digraph g {{\n")?;
     write!(w, "node [labeljust=\"l\", shape=record, fontname=\"Courier New\"]\n")?;
-    write!(w, "edge [fontname=\"Courier New\", fontsize=9]\n\n")?;
+    write!(w, "edge [fontname=\"Courier New\" ]\n\n")?;
 
     let fun_name = format_label(&format!("{:?}/{}", function.name, function.arity));
     write!(w, "entry [ label=<entry|fun: {} free: {}> ];\n", fun_name, function.num_free)?;
@@ -410,7 +420,7 @@ pub fn function_to_dot(function: &SSAFunction, w: &mut Write) -> ::std::io::Resu
             if phi.dead {
                 continue;
             }
-            let fmt = format_label(&format!("${}, = PHI[{:?}]",
+            let fmt = format_label(&format!("${}, = PHI[{:?}]\n",
                                             phi.output.0, phi.inputs));
             write!(w, "{}", fmt)?;
         }
@@ -438,22 +448,25 @@ pub fn function_to_dot(function: &SSAFunction, w: &mut Write) -> ::std::io::Resu
                 write!(w, "] ")?;
             }
 
+            //write!(w, "r{:?}", op.r)?;
+            //write!(w, " w{:?}", op.w)?;
+
             write!(w, "{}", DOT_BREAK)?;
         }
 
-        write!(w, "jumps[")?;
-        for label in block.jumps.iter() {
-            write!(w, "{}, ", label.name())?;
-        }
-        write!(w, "] ")?;
+        //write!(w, "jumps[")?;
+        //for label in block.jumps.iter() {
+        //    write!(w, "{}, ", label.name())?;
+        //}
+        //write!(w, "] ")?;
 
         write!(w, "> ];\n")?;
 
         if let Some(label) = block.continuation {
             write!(w, "blk_{} -> blk_{} [ label=cont ];\n", block_name, label.name())?;
         }
-        for arg in &block.jumps {
-            write!(w, "blk_{} -> blk_o{} [  ];\n", block_name, arg.name())?;
+        for (idx, arg) in block.jumps.iter().enumerate() {
+            write!(w, "blk_{} -> blk_{} [ label={} ];\n", block_name, arg.name(), idx)?;
         }
         write!(w, "\n")?;
     }

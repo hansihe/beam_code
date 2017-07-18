@@ -26,7 +26,7 @@ mod graph;
 fn main() {
     let gen_op_table = GenOpTable::from_file("test_data/genop.tab");
 
-    let file = RawBeamFile::from_file("test_data/Elixir.Test.beam").unwrap();
+    let file = RawBeamFile::from_file("test_data/Elixir.Enum.beam").unwrap();
     let module = Module::from_beam_file(&file, &gen_op_table);
     //println!("{:#?}", module);
 
@@ -36,10 +36,12 @@ fn main() {
     //println!("{:#?}", code);
 
     let functions = ssa::code_to_functions(&code, &module);
-    println!("{:?}", functions);
+    //println!("{:?}", functions);
+
+    //println!("{:#?}", functions[4]);
 
     let mut dot_out = std::fs::File::create("cfg.dot").unwrap();
-    ssa::function_to_dot(&functions[4], &mut dot_out).unwrap(); // 34
+    ssa::function_to_dot(&functions[34], &mut dot_out).unwrap(); // 34 // 4
 
 
 }

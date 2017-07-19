@@ -204,7 +204,7 @@ pub fn code_to_functions(code: &[Op], module: &Module) -> Vec<SSAFunction> {
                     phi_nodes: block.phi_nodes.values().cloned().collect(),
                     ops: block.ops.iter().enumerate().map(|(op_num, op)| {
                         if op_num != block.ops.len()-1 {
-                            println!("{:?}", op);
+                            //println!("{:?}", op);
                             assert!(op.op.labels.len() == 0);
                         }
                         SSAOp {
@@ -256,7 +256,7 @@ fn function_dominator_frontiers(fun: &IntFunction) ->
 }
 
 fn function_propagate_ssa(fun: &mut IntFunction) {
-    println!("{:?}/{}", fun.name, fun.arity);
+    //println!("{:?}/{}", fun.name, fun.arity);
 
     // Place PHI nodes
     let frontiers = function_dominator_frontiers(fun);
@@ -328,7 +328,7 @@ fn function_propagate_ssa(fun: &mut IntFunction) {
                        visited: &mut HashSet<ExtLabel>, mut state: ReadPropState,
                        last: ExtLabel, entry: ExtLabel) {
 
-        println!("{}: {:?} {:?}", level, entry, state);
+        //println!("{}: {:?} {:?}", level, entry, state);
 
         {
             let block = blocks.get_mut(&entry).unwrap();
@@ -345,7 +345,7 @@ fn function_propagate_ssa(fun: &mut IntFunction) {
                 for (idx, source) in op.op.reads.iter().enumerate() {
                     if let &Source::Register(reg) = source {
                         //println!("{:?}, {:?}, {:?}", reg, op.reads, state.assignments);
-                        println!("read: {:?}", reg);
+                        //println!("read: {:?}", reg);
                         op.reads[idx] = SSASource::Register(state.assignments[&reg]);
                     }
                 }

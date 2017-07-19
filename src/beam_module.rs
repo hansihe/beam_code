@@ -43,8 +43,13 @@ impl Module {
             vec![]
         };
 
-        let lit_raw = file.chunks.iter().find(|c| &c.id == b"LitT").unwrap();
-        println!("{:?}", lit_raw);
+        //let lit_raw = file.chunks.iter().find(|c| &c.id == b"LitT").unwrap();
+        //println!("{:?}", lit_raw);
+
+        let lit_raw = file.chunks.iter().find(|c| &c.id == b"Attr").unwrap();
+        let a = ::eetf::Term::decode(Cursor::new(&lit_raw.data));
+        println!("{:?}", a);
+        println!("Attr: {:?}", lit_raw);
 
         // https://github.com/erlang/otp/blob/master/erts/emulator/beam/beam_load.c
         //let literals_raw = file.chunks.iter().find(|c| &c.id == b"LitT").unwrap();

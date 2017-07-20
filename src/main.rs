@@ -2,6 +2,7 @@ extern crate eetf;
 extern crate itertools;
 extern crate regex;
 extern crate byteorder;
+extern crate string_intern;
 
 extern crate beam_file;
 use beam_file::RawBeamFile;
@@ -23,10 +24,13 @@ mod ssa;
 
 mod graph;
 
+mod atom;
+pub use atom::Atom;
+
 fn main() {
     let gen_op_table = GenOpTable::from_file("test_data/genop.tab");
 
-    let file = RawBeamFile::from_file("test_data/Elixir.Enum.beam").unwrap();
+    let file = RawBeamFile::from_file("test_data/gen_server.beam").unwrap();
     let module = Module::from_beam_file(&file, &gen_op_table);
     //println!("{:#?}", module);
 
@@ -40,8 +44,13 @@ fn main() {
 
     //println!("{:#?}", functions[4]);
 
+    let fun_atom = Atom::from("loop");
+    let fun = functions.iter().find(|f| {
+        f.name == fun_atom && f.arity == 7
+    }).unwrap();
+
     let mut dot_out = std::fs::File::create("cfg.dot").unwrap();
-    ssa::function_to_dot(&functions[34], &mut dot_out).unwrap(); // 34 // 4
+    ssa::function_to_dot(fun, &mut dot_out).unwrap(); // 34 // 4
 
 
 }

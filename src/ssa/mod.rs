@@ -1,8 +1,9 @@
 use ::std::collections::HashSet;
 use ::std::collections::HashMap;
 
+use ::Atom;
 use ::op::{ Op, LabelId, Register, OpKind, Source, Literal };
-use ::beam_module::{ Module, Atom };
+use ::beam_module::{ Module };
 
 use ::itertools::Itertools;
 
@@ -15,16 +16,17 @@ pub use self::representation::{
     SSARegister,
     SSASource,
     ExtLabel,
+    FunDefType,
 };
 
 #[derive(Debug)]
 pub struct IntFunction {
     name: Atom,
     arity: u32,
-    num_free: u32,
     entry: ExtLabel,
     blocks: HashMap<ExtLabel, IntBasicBlock>,
     args: Vec<(Register, SSARegister)>,
+    fun_type: FunDefType,
 }
 
 #[derive(Debug, Clone)]
@@ -44,7 +46,64 @@ pub struct ExtOp {
     reads: Vec<SSASource>,
 }
 
+
+#[derive(Debug)]
+struct FunDef {
+    module: Atom,
+    name: Atom,
+    arity: u32,
+    label: LabelId,
+    fun_type: FunDefType,
+}
+
 pub fn code_to_functions(code: &[Op], module: &Module) -> Vec<SSAFunction> {
+
+    let lambdas: HashMap<(Atom, u32), (LabelId, u32)> = module.lambdas.iter()
+        .map(|l| ((l.function.clone(), l.arity), (LabelId(l.label), l.num_free))).collect();
+    let exports: HashMap<(Atom, u32), LabelId> = module.exports.iter()
+        .map(|l| ((l.function.clone(), l.arity), LabelId(l.label))).collect();
+
+    // Collect function definitions
+    let fun_defs = code.iter().scan(LabelId(0), |state, op| {
+        if let OpKind::Label { num } = op.kind {
+            *state = num;
+        }
+        Some((*state, op))
+    }).filter_map(|(label, op)| {
+        if let OpKind::FuncInfo { ref module, ref function, arity, .. } = op.kind {
+            if label == LabelId(0) {
+                panic!("FuncInfo without label");
+            }
+
+            let key = (function.clone(), arity);
+            let is_lambda = lambdas.get(&key);
+            let is_export = exports.get(&key);
+
+            let typ = match (is_lambda, is_export) {
+                (None, None) => FunDefType::Private,
+                (Some(&(id, num_free)), None) => {
+                    assert!(label.0 == id.0-1);
+                    FunDefType::Lambda(num_free)
+                }
+                (None, Some(id)) => {
+                    assert!(label.0 == id.0-1);
+                    FunDefType::Public
+                }
+                _ => panic!(),
+            };
+
+            Some(FunDef {
+                module: module.clone(),
+                name: function.clone(),
+                arity: arity,
+                label: label,
+                fun_type: typ,
+            })
+        } else {
+            None
+        }
+    }).collect_vec();
+
     // Split bytecode into opcodes
     let mut basic_blocks: Vec<IntBasicBlock> = code.iter()
         .scan((false, 0u32), |&mut (ref mut last_label, ref mut id), op| {
@@ -122,14 +181,55 @@ pub fn code_to_functions(code: &[Op], module: &Module) -> Vec<SSAFunction> {
     for block_num in 0..(basic_blocks.len() - 1) {
         let elems = &mut basic_blocks[block_num..block_num + 2];
 
-        if elems[0].ops.last().unwrap().op.can_continue() {
+        // If the last instruction in a block is a jump,
+        // assign that as the continuation..
+        if let OpKind::Jump = elems[0].ops.last().unwrap().op.kind {
+            elems[0].continuation = Some(ExtLabel::Original(
+                elems[0].ops.last().unwrap().op.labels[0].0));
+            elems[0].ops.pop();
+        }
+        // ..if not, assign the following block if the last op
+        // can fall through
+        else if elems[0].ops.last().unwrap().op.can_continue() {
             elems[0].continuation = Some(elems[1].label);
         }
     }
 
     // Assign jumps
     for mut block in &mut basic_blocks {
-        block.jumps = block.ops.last().unwrap().op.labels.clone();
+        if let Some(last_op) = block.ops.last() {
+            block.jumps = last_op.op.labels.clone();
+        }
+    }
+
+    // Reorder moves arund try instructions
+    let mut reorders = Vec::new();
+    // Collect blocks that should be reordered around
+    for (idx, block) in basic_blocks.iter().enumerate() {
+        if let Some(last_op) = block.ops.last() {
+            // FIXME: move exception_ctx into writes?
+            if let OpKind::Try = last_op.op.kind {
+                if let ExtLabel::Added(_) = block.continuation.unwrap() {
+                    reorders.push((idx, last_op.op.writes[0]));
+                }
+            }
+        }
+    }
+    // Perform reordering
+    for &(first_idx, clobbered_reg) in &reorders {
+        // Collect instructions from second block to move to first
+        let num = basic_blocks[first_idx+1].ops.iter()
+            .take_while(|b| b.op.kind == OpKind::Move && !b.op.touches_reg(clobbered_reg))
+            .count();
+        let mut removed = basic_blocks.get_mut(first_idx+1).unwrap().ops.drain(0..num).collect_vec();
+
+        // Insert into previous block
+        let bb = basic_blocks.get_mut(first_idx).unwrap();
+        // TODO: Make insertion more efficient
+        for r in removed.drain(..) {
+            let elem_num = bb.ops.len() - 1;
+            bb.ops.insert(elem_num, r);
+        }
     }
 
     let resolve_label = |label_id| {
@@ -160,29 +260,17 @@ pub fn code_to_functions(code: &[Op], module: &Module) -> Vec<SSAFunction> {
     // Divide graph into separate functions
     let mut functions = Vec::new();
 
-    for export in &module.exports {
-        let label = ExtLabel::Original(export.label);
+    for fun in &fun_defs {
+        let label = ExtLabel::Original(fun.label.0);
         functions.push(IntFunction {
-            name: export.function.clone(),
-            arity: export.arity,
-            num_free: 0,
+            name: fun.name.clone(),
+            arity: fun.arity,
             entry: label,
             blocks: resolve_label(label),
             args: Vec::new(),
+            fun_type: fun.fun_type,
         });
     }
-    for lambda in &module.lambdas {
-        let label = ExtLabel::Original(lambda.label);
-        functions.push(IntFunction {
-            name: lambda.function.clone(),
-            arity: lambda.arity,
-            num_free: lambda.num_free,
-            entry: label,
-            blocks: resolve_label(label),
-            args: Vec::new(),
-        })
-    }
-
     for function in &mut functions {
         function_propagate_ssa(function);
     }
@@ -192,7 +280,7 @@ pub fn code_to_functions(code: &[Op], module: &Module) -> Vec<SSAFunction> {
         let mut ssa_fun = SSAFunction {
             name: f.name.clone(),
             arity: f.arity,
-            num_free: f.num_free,
+            fun_type: f.fun_type,
             entry: f.entry,
             args: f.args.iter().map(|&(_, arg)| arg).collect(),
             blocks: f.blocks.iter().map(|(label, block)| {
@@ -256,7 +344,7 @@ fn function_dominator_frontiers(fun: &IntFunction) ->
 }
 
 fn function_propagate_ssa(fun: &mut IntFunction) {
-    //println!("{:?}/{}", fun.name, fun.arity);
+    //println!("{:?}/{} {:?}", fun.name, fun.arity, fun.fun_type);
 
     // Place PHI nodes
     let frontiers = function_dominator_frontiers(fun);
@@ -344,7 +432,7 @@ fn function_propagate_ssa(fun: &mut IntFunction) {
             for op in block.ops.iter_mut() {
                 for (idx, source) in op.op.reads.iter().enumerate() {
                     if let &Source::Register(reg) = source {
-                        //println!("{:?}, {:?}, {:?}", reg, op.reads, state.assignments);
+                        //println!("{:?}, {:?}, {:?}, {:?}, {:?}", reg, op.op.kind, op.op.reads, op.op.writes, state.assignments);
                         //println!("read: {:?}", reg);
                         op.reads[idx] = SSASource::Register(state.assignments[&reg]);
                     }
@@ -408,7 +496,8 @@ pub fn function_to_dot(function: &SSAFunction, w: &mut Write) -> ::std::io::Resu
     write!(w, "edge [fontname=\"Courier New\" ]\n\n")?;
 
     let fun_name = format_label(&format!("{:?}/{}", function.name, function.arity));
-    write!(w, "entry [ label=<entry|fun: {} free: {}> ];\n", fun_name, function.num_free)?;
+    write!(w, "entry [ label=<entry|fun: {} free: {:?} write[{:?}]> ];\n",
+           fun_name, function.fun_type, function.args)?;
     write!(w, "entry -> blk_{};\n\n", function.entry.name())?;
 
     for (_, block) in &function.blocks {
@@ -441,7 +530,7 @@ pub fn function_to_dot(function: &SSAFunction, w: &mut Write) -> ::std::io::Resu
                 for read in op.reads.iter() {
                     match *read {
                         SSASource::Register(reg) => write!(w, "${}, ", reg.0)?,
-                        SSASource::Literal(ref lit) => write!(w, "{}", format_label(
+                        SSASource::Literal(ref lit) => write!(w, "{}, ", format_label(
                             &format!("{:?}", lit)))?,
                     }
                 }

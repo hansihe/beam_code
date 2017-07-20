@@ -4,7 +4,7 @@ use ::byteorder::ReadBytesExt;
 
 use ::std::io::Read;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawOp {
     pub opcode: GenOp,
     pub args: Vec<RawOpArg>,
@@ -88,7 +88,7 @@ fn get_tag_val<R>(reader: &mut R) -> (u32, u32) where R: Read {
     (arg_type, val)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawOpArg {
     Untagged(u32),
     Integer(u32),

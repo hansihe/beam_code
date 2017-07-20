@@ -3,4 +3,8 @@ target/
 
 test_data/decomp.ex
 test_data/Elixir.Test.beam
+test_data/*.erl
+test_data/*.ex
+test_data/*.beam
+test_data/*.core
 cfg.*

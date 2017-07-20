@@ -1,4 +1,4 @@
-use ::beam_module::Atom;
+use ::Atom;
 use ::op::{ OpKind, Literal, Register, Source, AtomLiteral };
 
 use ::std::collections::HashMap;
@@ -17,10 +17,17 @@ pub struct SSAOp {
 pub struct SSAFunction {
     pub name: Atom,
     pub arity: u32,
-    pub num_free: u32,
+    pub fun_type: FunDefType,
     pub entry: ExtLabel,
     pub args: Vec<SSARegister>,
     pub blocks: HashMap<ExtLabel, SSABasicBlock>,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum FunDefType {
+    Lambda(u32),
+    Public,
+    Private,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +59,14 @@ pub enum SSASource {
     Register(SSARegister),
     Literal(Literal),
 }
+impl SSASource {
+    pub fn get_register(&self) -> SSARegister {
+        match *self {
+            SSASource::Register(reg) => reg,
+            _ => panic!(),
+        }
+    }
+}
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub enum ExtLabel {
@@ -77,12 +92,14 @@ impl ExtLabel {
 
 impl SSAFunction {
 
-    pub fn replace_reads(&mut self, orig: SSARegister, replace: &SSASource) {
+    pub fn replace_reads(&mut self, orig: SSARegister, replace: &SSASource) -> bool {
+        let mut changed = false;
         for (_, block) in self.blocks.iter_mut() {
             for phi in &mut block.phi_nodes {
                 for (_, read) in phi.inputs.iter_mut() {
                     if *read == SSASource::Register(orig) {
                         *read = replace.clone();
+                        changed = true;
                     }
                 }
             }
@@ -91,11 +108,13 @@ impl SSAFunction {
                     if let SSASource::Register(reg) = *read {
                         if reg == orig {
                             *read = replace.clone();
+                            changed = true;
                         }
                     }
                 }
             }
         }
+        changed
     }
 
     pub fn clean(&mut self) {
@@ -116,8 +135,19 @@ impl SSAFunction {
             })
         }
 
-        for (orig, replace) in renames {
-            self.replace_reads(orig, &replace);
+        //if self.name == Atom::from("into") && self.arity == 4 {
+        //    println!("{:?}", renames);
+        //}
+
+        // TODO: Make this more efficient
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for &(orig, ref replace) in &renames {
+                if self.replace_reads(orig, replace) {
+                    changed = true;
+                }
+            }
         }
 
     }

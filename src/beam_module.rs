@@ -2,10 +2,12 @@ use std::str::from_utf8;
 use std::rc::Rc;
 use std::io::Cursor;
 use std::io::Read;
+use std::str::FromStr;
 
 use ::beam_file::RawBeamFile;
 use ::raw_op::RawOp;
 use ::gen_op::GenOpTable;
+use ::Atom;
 
 use ::byteorder::{ ReadBytesExt, BigEndian };
 
@@ -73,20 +75,8 @@ impl Module {
 
 }
 
-pub type Atom = Rc<AtomInner>;
-#[derive(PartialEq, Eq, Hash)]
-pub struct AtomInner {
-    pub id: u32,
-    pub string: String,
-}
-impl ::std::fmt::Debug for AtomInner {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-        write!(f, "Atom({}, {:?})", self.id, self.string)
-    }
-}
-
 pub type Export = Rc<ExportInner>;
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ExportInner {
     pub id: u32,
     pub function: Atom,
@@ -95,7 +85,7 @@ pub struct ExportInner {
 }
 
 pub type Import = Rc<ImportInner>;
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ImportInner {
     pub id: u32,
     pub module: Atom,
@@ -104,7 +94,7 @@ pub struct ImportInner {
 }
 
 pub type Lambda = Rc<LambdaInner>;
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct LambdaInner {
     pub id: u32,
     pub function: Atom,
@@ -231,10 +221,9 @@ fn read_atoms(data: &[u8]) -> Vec<Atom> {
         let mut atom_raw = vec![0; atom_len];
         reader.read_exact(&mut atom_raw).unwrap();
 
-        atoms.push(Rc::new(AtomInner {
-            id: atom_num,
-            string: String::from_utf8(atom_raw).unwrap(),
-        }));
+        let atom_str = String::from_utf8(atom_raw).unwrap();
+        let atom = Atom::from_str(&atom_str).unwrap();
+        atoms.push(atom);
     }
 
     atoms

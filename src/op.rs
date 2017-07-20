@@ -1,6 +1,7 @@
-use super::{ RawOp, RawOpArg };
-use ::beam_module::{ Module, Atom, Import, Lambda };
+use super::{ RawOp, RawOpArg, Atom };
+use ::beam_module::{ Module, Import, Lambda };
 use ::itertools::Itertools;
+use ::gen_op::OpName;
 
 use ::std::rc::Rc;
 
@@ -46,7 +47,7 @@ impl Op {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpKind {
 
     // Info
@@ -68,6 +69,9 @@ pub enum OpKind {
     Return,
     /// Arguments in regs x[0..arity], fun in x[arity]
     CallFun { arity: u32 },
+    /// mod in x[0], fun in x[1], args as list in x[2]
+    /// result in x[0]
+    Apply,
 
     // Testing
     UnaryTest { test: UnaryTest },
@@ -123,16 +127,25 @@ pub enum OpKind {
     SelectVal { matches: Vec<Literal> },
     Jump,
 
+    // Messages
+    Wait,
+    WaitTimeout,
+    Timeout,
+    LoopRec,
+    LoopRecEnd,
+    RemoveMessage,
+
     // Errors
     Raise(RaiseType),
-    Try { exception_ctx: Register, landing_pad: LabelId },
-    TryEnd { exception_ctx: Register },
-    TryCase { exception_ctx: Register },
+    Try,
+    TryCase,
+    TryEnd,
+    CatchEnd,
 
     Unknown(RawOp),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RaiseType {
     /// 2 reads, error class and value
     Error,
@@ -143,13 +156,7 @@ pub enum RaiseType {
     CaseEnd,
 }
 
-#[derive(Debug, Clone)]
-pub enum BifArgs {
-    Bif1(Source),
-    Bif2(Source, Source),
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnaryTest {
     // Types
     Integer,
@@ -176,7 +183,7 @@ pub enum UnaryTest {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinaryTest {
     // Comparison
     IsLt,
@@ -215,6 +222,11 @@ macro_rules! impl_op_repeat_arg {
     ($ctx:expr, $op_ctx:expr, $list:expr, read) => {
         for l in $list.iter() {
             $op_ctx.reads.push(Source::from_raw(l, $ctx.1).unwrap());
+        }
+    };
+    ($ctx:expr, $op_ctx:expr, $list:expr, write) => {
+        for l in $list.iter() {
+            $op_ctx.writes.push(Register::from_raw(l).unwrap());
         }
     };
 }
@@ -268,27 +280,35 @@ macro_rules! impl_op_arg {
     ($ctx:expr, $op_ctx:expr, (read_reg, $reg:expr)) => {
         $op_ctx.reads.push(Source::Register($reg));
     };
+    ($ctx:expr, $op_ctx:expr, (write_reg, $reg:expr)) => {
+        $op_ctx.writes.push($reg);
+    };
 }
 
 macro_rules! impl_op {
     ($ctx:expr, $name:expr, [ $($dec_op:tt),* ], $enum:expr) => {
-        if &$ctx.0.opcode.name == $name {
-            let mut op_ctx = MacroOpCtx {
-                labels: vec![],
-                reads: vec![],
-                writes: vec![],
-                arg_num: 0,
-            };
+        #[allow(unused_mut)]
+        {
+            // TODO: Creating OpNames from strings is the slowest thing
+            // in the whole program, fix it!
+            if $ctx.0.opcode.name == OpName::from($name) {
+                let mut op_ctx = MacroOpCtx {
+                    labels: vec![],
+                    reads: vec![],
+                    writes: vec![],
+                    arg_num: 0,
+                };
 
-            $(
-                impl_op_arg!($ctx, op_ctx, $dec_op);
-            )*
+                $(
+                    impl_op_arg!($ctx, op_ctx, $dec_op);
+                )*
 
-            return Op {
-                kind: $enum,
-                reads: op_ctx.reads,
-                writes: op_ctx.writes,
-                labels: op_ctx.labels,
+                    return Op {
+                        kind: $enum,
+                        reads: op_ctx.reads,
+                        writes: op_ctx.writes,
+                        labels: op_ctx.labels,
+                    }
             }
         }
     };
@@ -315,6 +335,8 @@ impl Op {
             OpKind::HasMapFields { .. } => true,
             OpKind::Try { .. } => true,
             OpKind::Jump => true,
+            OpKind::WaitTimeout => true,
+            OpKind::LoopRec => true,
             _ => false,
         }
     }
@@ -324,8 +346,8 @@ impl Op {
             OpKind::Raise(_) => false,
             OpKind::Return => false,
             // Special case, :erlang.error BIF never returns
-            OpKind::CallExt { ref import, .. } if import.module.string == "erlang"
-                && import.function.string == "error" => false,
+            OpKind::CallExt { ref import, .. } if import.module == Atom::from("erlang")
+                && import.function == Atom::from("error") => false,
             OpKind::CallExtLast { .. } => false,
             OpKind::CallExtOnly { .. } => false,
             OpKind::Jump => false,
@@ -333,8 +355,24 @@ impl Op {
             OpKind::CallLast { .. } => false,
             OpKind::CallOnly { .. } => false,
             OpKind::TupleArity { .. } => false,
+            OpKind::Wait => false,
+            OpKind::LoopRecEnd => false,
             _ => true,
         }
+    }
+
+    pub fn touches_reg(&self, reg: Register) -> bool {
+        for r in &self.reads {
+            if *r == Source::Register(reg) {
+                return true;
+            }
+        }
+        for w in &self.writes {
+            if *w == reg {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn from_raw(raw_op: &RawOp, module: &Module) -> Op {
@@ -343,6 +381,7 @@ impl Op {
         let lambdas = &module.lambdas;
 
         let ctx = (raw_op, module);
+
 
         impl_op!(&ctx, "return", [ (read_reg, Register::X(0)) ], OpKind::Return);
         impl_op!(&ctx, "move", [ read, write ], OpKind::Move);
@@ -409,20 +448,75 @@ impl Op {
         impl_op!(&ctx, "is_number", [ label, read ], OpKind::UnaryTest { test: UnaryTest::Number });
         impl_op!(&ctx, "is_atom", [ label, read ], OpKind::UnaryTest { test: UnaryTest::Atom });
         impl_op!(&ctx, "is_pid", [ label, read ], OpKind::UnaryTest { test: UnaryTest::Pid });
-        impl_op!(&ctx, "is_reference", [ label, read ], OpKind::UnaryTest { test: UnaryTest::Reference });
+        impl_op!(&ctx, "is_reference", [ label, read ],
+                 OpKind::UnaryTest { test: UnaryTest::Reference });
         impl_op!(&ctx, "is_port", [ label, read ], OpKind::UnaryTest { test: UnaryTest::Port });
         impl_op!(&ctx, "is_nil", [ label, read ], OpKind::UnaryTest { test: UnaryTest::Nil });
         impl_op!(&ctx, "is_binary", [ label, read ], OpKind::UnaryTest { test: UnaryTest::Binary });
         impl_op!(&ctx, "is_list", [ label, read ], OpKind::UnaryTest { test: UnaryTest::List });
-        impl_op!(&ctx, "is_nonempty_list", [ label, read ], OpKind::UnaryTest { test: UnaryTest::NonemptyList });
+        impl_op!(&ctx, "is_nonempty_list", [ label, read ],
+                 OpKind::UnaryTest { test: UnaryTest::NonemptyList });
+        impl_op!(&ctx, "is_tuple", [ label, read ], OpKind::UnaryTest { test: UnaryTest::Tuple });
+        impl_op!(&ctx, "is_map", [ label, read ], OpKind::UnaryTest { test: UnaryTest::Map });
+        impl_op!(&ctx, "is_boolean", [ label, read ], OpKind::UnaryTest { test: UnaryTest::Boolean });
+        impl_op!(&ctx, "is_function", [ label, read ],
+                 OpKind::UnaryTest { test: UnaryTest::Function });
+        impl_op!(&ctx, "is_function2", [ label, read, (named, arity) ],
+                 OpKind::UnaryTest { test: UnaryTest::FunctionArity(arity.integer()) });
+        impl_op!(&ctx, "test_arity", [ label, read, (named, a) ],
+                 OpKind::UnaryTest { test: UnaryTest::Arity(a.untagged()) });
+        impl_op!(&ctx, "is_tagged_tuple", [ label, read, (named, arity), (named, atom) ],
+                 OpKind::UnaryTest { test: UnaryTest::TaggedTuple {
+                     arity: arity.untagged(),
+                     atom: AtomLiteral::from_raw(atom, module).unwrap(),
+                 } });
+        impl_op!(&ctx, "is_eq", [ label, read, read ], OpKind::BinaryTest { test: BinaryTest::IsEq });
+        impl_op!(&ctx, "is_ne", [ label, read, read ], OpKind::BinaryTest { test: BinaryTest::IsNe });
+        impl_op!(&ctx, "is_ge", [ label, read, read ], OpKind::BinaryTest { test: BinaryTest::IsGe });
+        impl_op!(&ctx, "is_lt", [ label, read, read ], OpKind::BinaryTest { test: BinaryTest::IsLt });
+        impl_op!(&ctx, "is_eq_exact", [ label, read, read ],
+                 OpKind::BinaryTest { test: BinaryTest::IsEqExact });
+        impl_op!(&ctx, "is_ne_exact", [ label, read, read ],
+                 OpKind::BinaryTest { test: BinaryTest::IsNeExact });
+        impl_op!(&ctx, "badmatch", [ read ], OpKind::Raise(RaiseType::BadMatch));
+        impl_op!(&ctx, "if_end", [], OpKind::Raise(RaiseType::IfEnd));
+        impl_op!(&ctx, "case_end", [ read ], OpKind::Raise(RaiseType::IfEnd));
+        impl_op!(&ctx, "int_code_end", [], OpKind::CodeEnd);
+        impl_op!(&ctx, "get_map_elements", [ label, read, (repeat, [(named, elem), write]) ],
+                 OpKind::GetMapElems {
+                     entries: elem.iter().map(|lit| Source::from_raw(lit, module).unwrap()).collect(),
+                 });
+        impl_op!(&ctx, "raise", [ read, read ], OpKind::Raise(RaiseType::Error));
+        impl_op!(&ctx, "jump", [ label ], OpKind::Jump);
+        impl_op!(&ctx, "apply", [ (read_reg, Register::X(0)), (read_reg, Register::X(1)),
+                                   (read_reg, Register::X(2)), (write_reg, Register::X(0)) ],
+                 OpKind::Apply);
+
+        impl_op!(&ctx, "wait", [ label ], OpKind::Wait);
+        impl_op!(&ctx, "loop_rec", [ label, _ ], OpKind::LoopRec);
+        impl_op!(&ctx, "loop_rec_end", [ label ], OpKind::LoopRecEnd);
+        impl_op!(&ctx, "remove_message", [ (write_reg, Register::X(0)) ], OpKind::RemoveMessage);
+        impl_op!(&ctx, "wait_timeout", [ label, read ], OpKind::WaitTimeout);
+        impl_op!(&ctx, "timeout", [], OpKind::Timeout);
+
+        impl_op!(&ctx, "try", [ write, label ], OpKind::Try);
+        impl_op!(&ctx, "try_case", [ read, (write_reg, Register::X(0)),
+                                     (write_reg, Register::X(1)), (write_reg, Register::X(2)) ],
+                 OpKind::TryCase);
+        impl_op!(&ctx, "try_end", [ read ], OpKind::TryEnd);
+        impl_op!(&ctx, "catch", [ write, label ], OpKind::Try);
+        //impl_op!(&ctx, "try_case", [ read, (write_reg, Register::X(0)),
+        //                             (write_reg, Register::X(1)), (write_reg, Register::X(2)) ],
+        //         OpKind::TryCase);
+        impl_op!(&ctx, "catch_end", [ read ], OpKind::CatchEnd);
 
         match &raw_op.opcode.name {
             // TODO
-            n if n == "make_fun2" =>
+            n if *n == OpName::from("make_fun2") =>
                 Op::empty(OpKind::MakeFun2 {
                     lambda: lambdas[raw_op.args[0].untagged() as usize].clone()
                 }),
-            n if n == "call_fun" => {
+            n if *n == OpName::from("call_fun") => {
                 let arity = raw_op.args[0].untagged();
                 Op {
                     kind: OpKind::CallFun { arity: arity },
@@ -431,112 +525,57 @@ impl Op {
                     reads: (0..(arity+1)).map(|n| Source::Register(Register::X(n))).collect(),
                 }
             }
-            n if n == "is_tuple" => make_unary_test(raw_op, UnaryTest::Tuple, module),
-            n if n == "is_map" => make_unary_test(raw_op, UnaryTest::Map, module),
-            n if n == "is_boolean" => make_unary_test(raw_op, UnaryTest::Boolean, module),
-            n if n == "is_function" => make_unary_test(raw_op, UnaryTest::Function, module),
-            n if n == "test_arity" => make_unary_test(raw_op, UnaryTest::Arity(
-                raw_op.args[2].untagged()), module),
-            n if n == "is_tagged_tuple" => {
-                make_unary_test(raw_op, UnaryTest::TaggedTuple {
-                    arity: raw_op.args[2].untagged(),
-                    atom: AtomLiteral::from_raw(&raw_op.args[3], module).unwrap(),
-                }, module)
-            }
-            n if n == "is_function2" =>
-                make_unary_test(raw_op, UnaryTest::FunctionArity(raw_op.args[2].integer()), module),
-            n if n == "is_eq" => make_binary_test(raw_op, BinaryTest::IsEq, module),
-            n if n == "is_ne" => make_binary_test(raw_op, BinaryTest::IsNe, module),
-            n if n == "is_ge" => make_binary_test(raw_op, BinaryTest::IsGe, module),
-            n if n == "is_lt" => make_binary_test(raw_op, BinaryTest::IsLt, module),
-            n if n == "is_eq_exact" => make_binary_test(raw_op, BinaryTest::IsEqExact, module),
-            n if n == "is_ne_exact" => make_binary_test(raw_op, BinaryTest::IsNeExact, module),
-            n if n == "badmatch" =>
-                Op::with_reads(
-                    OpKind::Raise(RaiseType::BadMatch),
-                    vec![Source::from_raw(&raw_op.args[0], module).unwrap()]
-                ),
-            n if n == "if_end" =>
-                Op::empty(OpKind::Raise(RaiseType::IfEnd)),
-            n if n == "case_end" =>
-                Op::with_reads(
-                    OpKind::Raise(RaiseType::CaseEnd),
-                    vec![Source::from_raw(&raw_op.args[0], module).unwrap()]
-                ),
-            n if n == "int_code_end" =>
-                Op::empty(OpKind::CodeEnd),
-            n if n == "get_map_elements" => {
-                let entries = raw_op.args[2..].iter().tuples()
-                    .map(|(key, reg)| (Source::from_raw(key, module).unwrap(),
-                                       Register::from_raw(reg).unwrap()))
-                    .collect_vec();
-                Op {
-                    kind: OpKind::GetMapElems {
-                        entries: entries.iter().map(|&(ref lit, _)| lit.clone()).collect(),
-                    },
-                    reads: vec![Source::from_raw(&raw_op.args[1], module).unwrap()],
-                    writes: entries.iter().map(|&(_, reg)| reg).collect(),
-                    labels: vec![LabelId(raw_op.args[0].fail_label())],
-                }
-            },
-            n if n == "try" =>
-                Op {
-                    kind: OpKind::Try {
-                        exception_ctx: Register::from_raw(&raw_op.args[0]).unwrap(),
-                        landing_pad: LabelId(raw_op.args[1].fail_label()),
-                    },
-                    reads: vec![],
-                    writes: vec![],
-                    labels: vec![LabelId(raw_op.args[1].fail_label())],
-                },
-            n if n == "try_end" =>
-                Op::empty(OpKind::TryEnd {
-                    exception_ctx: Register::from_raw(&raw_op.args[0]).unwrap()
-                }),
-            n if n == "try_case" =>
-                Op::empty(OpKind::TryCase {
-                    exception_ctx: Register::from_raw(&raw_op.args[0]).unwrap()
-                }),
-            n if n == "raise" =>
-                Op::with_reads(
-                    OpKind::Raise(RaiseType::Error),
-                    vec![Source::from_raw(&raw_op.args[0], module).unwrap(),
-                         Source::from_raw(&raw_op.args[1], module).unwrap()]
-                ),
-            n if n == "jump" => Op {
+            n if *n == OpName::from("jump") => Op {
                 kind: OpKind::Jump,
                 labels: vec![LabelId(raw_op.args[0].fail_label())],
                 reads: vec![],
                 writes: vec![],
             },
             // FIXME read registers
-            n if n == "call_ext" =>
-                Op::empty(OpKind::CallExt {
-                    arity: raw_op.args[0].untagged(),
-                    import: imports[raw_op.args[1].untagged() as usize].clone(),
-                }),
-            n if n == "call_ext_only" =>
-                Op::empty(OpKind::CallExtOnly {
-                    arity: raw_op.args[0].untagged(),
-                    import: imports[raw_op.args[1].untagged() as usize].clone(),
-                }),
-            n if n == "call_ext_last" =>
-                Op::empty(OpKind::CallExtLast {
-                    arity: raw_op.args[0].untagged(),
-                    import: imports[raw_op.args[1].untagged() as usize].clone(),
-                    deallocate: raw_op.args[2].untagged(),
-                }),
-            n if n == "call" => {
+            n if *n == OpName::from("call_ext") => {
+                let arity = raw_op.args[0].untagged();
+                Op::with_reads_writes(
+                    OpKind::CallExt {
+                        arity: raw_op.args[0].untagged(),
+                        import: imports[raw_op.args[1].untagged() as usize].clone(),
+                    },
+                    (0..arity).map(|r| Source::Register(Register::X(r))).collect(),
+                    vec![Register::X(0)]
+                )
+            }
+            n if *n == OpName::from("call_ext_only") => {
                 let arity = raw_op.args[0].untagged();
                 Op::with_reads(
-                    OpKind::Call {
+                    OpKind::CallExtOnly {
                         arity: arity,
-                        fun_label: LabelId(raw_op.args[1].fail_label()),
+                        import: imports[raw_op.args[1].untagged() as usize].clone(),
                     },
                     (0..arity).map(|r| Source::Register(Register::X(r))).collect()
                 )
             }
-            n if n == "call_only" => {
+            n if *n == OpName::from("call_ext_last") => {
+                let arity = raw_op.args[0].untagged();
+                Op::with_reads(
+                    OpKind::CallExtLast {
+                        arity: arity,
+                        import: imports[raw_op.args[1].untagged() as usize].clone(),
+                        deallocate: raw_op.args[2].untagged(),
+                    },
+                    (0..arity).map(|r| Source::Register(Register::X(r))).collect()
+                )
+            }
+            n if *n == OpName::from("call") => {
+                let arity = raw_op.args[0].untagged();
+                Op::with_reads_writes(
+                    OpKind::Call {
+                        arity: arity,
+                        fun_label: LabelId(raw_op.args[1].fail_label()),
+                    },
+                    (0..arity).map(|r| Source::Register(Register::X(r))).collect(),
+                    vec![Register::X(0)]
+                )
+            }
+            n if *n == OpName::from("call_only") => {
                 let arity = raw_op.args[0].untagged();
                 Op::with_reads(
                     OpKind::CallOnly {
@@ -546,7 +585,7 @@ impl Op {
                     (0..arity).map(|r| Source::Register(Register::X(r))).collect()
                 )
             }
-            n if n == "call_last" => {
+            n if *n == OpName::from("call_last") => {
                 let arity = raw_op.args[0].untagged();
                 Op::with_reads(
                     OpKind::CallLast {
@@ -557,7 +596,7 @@ impl Op {
                     (0..arity).map(|r| Source::Register(Register::X(r))).collect()
                 )
             }
-            n if n == "bif0" => Op {
+            n if *n == OpName::from("bif0") => Op {
                 kind: OpKind::CallBif {
                     bif: imports[raw_op.args[0].untagged() as usize].clone(),
                     gc: None,
@@ -566,7 +605,7 @@ impl Op {
                 writes: vec![Register::from_raw(&raw_op.args[1]).unwrap()],
                 labels: vec![],
             },
-            n if n == "bif1" => {
+            n if *n == OpName::from("bif1") => {
                 let label = raw_op.args[0].fail_label();
                 Op {
                     kind: OpKind::CallBif {
@@ -578,7 +617,7 @@ impl Op {
                     labels: if label == 0 { vec![] } else { vec![LabelId(label)] },
                 }
             }
-            n if n == "bif2" => {
+            n if *n == OpName::from("bif2") => {
                 let label = raw_op.args[0].fail_label();
                 Op {
                     kind: OpKind::CallBif {
@@ -591,7 +630,7 @@ impl Op {
                     labels: if label == 0 { vec![] } else { vec![LabelId(label)] },
                 }
             }
-            n if n == "gc_bif1" => {
+            n if *n == OpName::from("gc_bif1") => {
                 let label = raw_op.args[0].fail_label();
                 Op {
                     kind: OpKind::CallBif {
@@ -603,7 +642,7 @@ impl Op {
                     labels: if label == 0 { vec![] } else { vec![LabelId(label)] },
                 }
             }
-            n if n == "gc_bif2" => {
+            n if *n == OpName::from("gc_bif2") => {
                 let label = raw_op.args[0].fail_label();
                 Op {
                     kind: OpKind::CallBif {
@@ -625,27 +664,7 @@ impl Op {
 
 }
 
-fn make_unary_test(raw_op: &RawOp, test: UnaryTest, module: &Module) -> Op {
-    Op::with_reads_labels(
-        OpKind::UnaryTest {
-            test: test,
-        },
-        vec![Source::from_raw(&raw_op.args[1], module).unwrap()],
-        vec![LabelId(raw_op.args[0].fail_label())]
-    )
-}
-fn make_binary_test(raw_op: &RawOp, test: BinaryTest, module: &Module) -> Op {
-    Op::with_reads_labels(
-        OpKind::BinaryTest {
-            test: test,
-        },
-        vec![Source::from_raw(&raw_op.args[1], module).unwrap(),
-             Source::from_raw(&raw_op.args[2], module).unwrap()],
-        vec![LabelId(raw_op.args[0].fail_label())]
-    )
-}
-
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Source {
     Literal(Literal),
     Register(Register),
@@ -667,6 +686,13 @@ impl Source {
 
     fn x_reg(num: u32) -> Source {
         Source::Register(Register::X(num))
+    }
+
+    pub fn get_register(&self) -> Register {
+        match *self {
+            Source::Register(reg) => reg,
+            _ => panic!(),
+        }
     }
 
 }
